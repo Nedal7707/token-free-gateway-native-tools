@@ -28,4 +28,14 @@ export interface NormalizedSendParams {
 	message: string;
 	model: string;
 	signal?: AbortSignal;
+	/** Native tool definitions passed through to providers that support real tool calling. */
+	tools?: unknown[];
+	/** Native tool_choice semantics ("auto" | "none" | "required" | {function:{name}}). */
+	toolChoice?: unknown;
+	/** Raw OpenAI chat messages (used by native-API providers to preserve tool history). */
+	messages?: unknown[];
+	/** Provider-side reasoning effort hint, when the upstream supports it. */
+	reasoningEffort?: string | number | boolean;
+	/** Stream line-by-line (true) or buffer (false). API clients honor this to forward SSE chunks live. */
+	stream?: boolean;
 }

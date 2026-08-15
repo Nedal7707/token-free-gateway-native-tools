@@ -93,7 +93,15 @@ export class ChatGPTWebClient extends BaseApiClient<ChatGPTWebAuth> {
 			`[ChatGPT Web] Sending message, Conversation ID: ${convId}, Model: ${params.model}`,
 		);
 
-		const body = {
+		// Build request body. When native tools are supplied, pass them through
+		// to ChatGPT's backend so the model can emit REAL tool_calls.
+		const tools = (params.tools ?? []) as {
+			type?: string;
+			function?: { name: string; description?: string; parameters?: unknown };
+		}[];
+		const toolChoice = params.toolChoice as string | { type?: string; function?: { name?: string } } | undefined;
+
+		const body: Record<string, unknown> = {
 			action: "next",
 			messages: [
 				{
@@ -114,6 +122,20 @@ export class ChatGPTWebClient extends BaseApiClient<ChatGPTWebAuth> {
 			reset_rate_limits: false,
 			force_use_sse: true,
 		};
+
+		if (tools.length > 0) {
+			body.tools = tools.map((t) => ({
+				type: "function",
+				function: {
+					name: t.function?.name ?? "",
+					description: t.function?.description ?? "",
+					parameters: t.function?.parameters ?? {},
+				},
+			}));
+		}
+		if (toolChoice) {
+			body.tool_choice = toolChoice;
+		}
 		const pageUrl = page.url();
 
 		return (await withTimeout(
@@ -225,13 +247,36 @@ export class ChatGPTWebClient extends BaseApiClient<ChatGPTWebAuth> {
 					const reader = res.body?.getReader();
 					if (!reader) return { ok: false, status: 500, error: "No response body", sentinelError };
 					const decoder = new TextDecoder();
-					let fullText = "";
-					while (true) {
-						const { done, value } = await reader.read();
-						if (done) break;
-						fullText += decoder.decode(value, { stream: true });
-					}
-					return { ok: true, data: fullText };
+					// Stream SSE chunks into a shared window buffer; the Node side polls
+					// it via page.evaluate for TRUE line-by-line delivery (not buffering).
+					const streamKey = `__tfg_s_${(reqBody.messages as { id?: string }[])?.[0]?.id ?? Math.random().toString(36).slice(2)}`;
+					(globalThis as Record<string, unknown>)[streamKey] = {
+						chunks: [] as string[],
+						done: false,
+						error: undefined as string | undefined,
+					};
+					const sink = (globalThis as Record<string, any>)[streamKey];
+					(async () => {
+						try {
+							while (true) {
+								const { done: d, value } = await reader.read();
+								if (d) break;
+								sink.chunks.push(decoder.decode(value, { stream: true }));
+							}
+						} catch (e) {
+							sink.error = e instanceof Error ? e.message : String(e);
+						} finally {
+							sink.done = true;
+						}
+					})();
+					// Return IMMEDIATELY so Node can poll the window buffer live.
+					return {
+						ok: true,
+						data: JSON.stringify({
+							streamKey,
+							bytes: 0,
+						}),
+					};
 				},
 				{ body, pageUrl },
 			),
@@ -250,12 +295,22 @@ export class ChatGPTWebClient extends BaseApiClient<ChatGPTWebAuth> {
 		message: string;
 		model?: string;
 		signal?: AbortSignal;
+		tools?: unknown[];
+		toolChoice?: unknown;
+		messages?: unknown[];
+		reasoningEffort?: string | number | boolean;
+		stream?: boolean;
 	}): Promise<ReadableStream<Uint8Array>> {
 		const page = await this.getPage();
 		const normalized: NormalizedSendParams = {
 			message: params.message,
 			model: params.model || this.config.defaultModel,
 			signal: params.signal,
+			tools: params.tools,
+			toolChoice: params.toolChoice,
+			messages: params.messages,
+			reasoningEffort: params.reasoningEffort,
+			stream: params.stream,
 		};
 		const responseData = (await this.callApi(page, normalized)) as EvalResult & {
 			sentinelError?: string;
@@ -277,8 +332,64 @@ export class ChatGPTWebClient extends BaseApiClient<ChatGPTWebAuth> {
 				`ChatGPT API error ${responseData.status}: ${responseData.error?.slice(0, 200) || ""}${sentinelHint}`,
 			);
 		}
-		console.log(`[ChatGPT Web] Response length: ${responseData.data?.length || 0} bytes`);
-		return textToStream(responseData.data ?? "");
+
+		// Live streaming: callApi stored SSE chunks in a window buffer under streamKey.
+		// Poll the buffer via page.evaluate and emit chunks as they arrive → TRUE line-by-line.
+		let streamInfo: { streamKey?: string } = {};
+		try {
+			streamInfo = JSON.parse(responseData.data ?? "{}");
+		} catch {
+			// Older path: data is raw text — return it as a single chunk.
+			return textToStream(responseData.data ?? "");
+		}
+		const streamKey = streamInfo.streamKey;
+		if (!streamKey) {
+			return textToStream(responseData.data ?? "");
+		}
+
+		const encoder = new TextEncoder();
+		const readable = new ReadableStream<Uint8Array>({
+			start: async (controller) => {
+				let lastLen = 0;
+				let done = false;
+				let error: string | undefined;
+				try {
+					while (!done) {
+						if (params.signal?.aborted) throw new Error("ChatGPT request cancelled");
+						const poll = await page.evaluate(
+							({ key, from }) => {
+								const sink = (globalThis as Record<string, any>)[key] as {
+									chunks: string[];
+									done: boolean;
+									error?: string;
+								} | undefined;
+								if (!sink) return { done: true, error: "stream buffer missing", chunks: [] as string[] };
+								const chunks = sink.chunks.slice(from);
+								return { done: sink.done, error: sink.error, chunks };
+							},
+							{ key: streamKey, from: lastLen },
+						);
+						for (const chunk of poll.chunks) {
+							controller.enqueue(encoder.encode(chunk));
+						}
+						lastLen += poll.chunks.reduce((n, c) => n + c.length, 0);
+						done = poll.done;
+						error = poll.error;
+						if (!done) await new Promise((r) => setTimeout(r, 100));
+					}
+					if (error) throw new Error(error);
+					controller.close();
+				} catch (e) {
+					controller.error(e instanceof Error ? e : new Error(String(e)));
+				} finally {
+					// Cleanup the window buffer.
+					await page.evaluate((key) => {
+						delete (globalThis as Record<string, any>)[key];
+					}, streamKey).catch(() => {});
+				}
+			},
+		});
+		return readable;
 	}
 
 	override async parseStream(

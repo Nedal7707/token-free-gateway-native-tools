@@ -41,7 +41,11 @@ function stripInlineThinkTags(text: string): { text: string; thinking: string } 
 class Accumulator {
 	text = "";
 	thinkingText = "";
+	toolCalls: { id?: string; name: string; arguments: string }[] = [];
+	sawToolCall = false;
 	private inThinking = false;
+	private inToolUse = false;
+	private currentTool: { id?: string; name: string; args: string } | null = null;
 
 	processLine(line: string, onDelta?: (delta: string) => void): void {
 		if (!line.startsWith("data:")) return;
@@ -54,6 +58,38 @@ class Accumulator {
 		}
 		if (data.type === "content_block_stop" && this.inThinking) {
 			this.inThinking = false;
+			return;
+		}
+
+		// Native tool_use block start (Anthropic format).
+		if (data.type === "content_block_start" && data.content_block?.type === "tool_use") {
+			this.inToolUse = true;
+			this.sawToolCall = true;
+			this.currentTool = {
+				id: data.content_block.id,
+				name: data.content_block.name ?? "",
+				args: "",
+			};
+			return;
+		}
+		// Tool input deltas (partial_json).
+		if (this.inToolUse && data.type === "content_block_delta" && data.delta?.type === "input_json_delta") {
+			this.currentTool!.args += data.delta.partial_json ?? "";
+			return;
+		}
+		// Tool use block stop — finalize the tool call.
+		if (data.type === "content_block_stop" && this.inToolUse) {
+			this.inToolUse = false;
+			if (this.currentTool && this.currentTool.name) {
+				let args = this.currentTool.args;
+				if (!args.trim().startsWith("{")) args = `{${args}}`;
+				this.toolCalls.push({
+					id: this.currentTool.id,
+					name: this.currentTool.name,
+					arguments: args,
+				});
+			}
+			this.currentTool = null;
 			return;
 		}
 
@@ -102,5 +138,7 @@ export async function parseClaudeStream(
 	return {
 		text: stripped.text.trim(),
 		thinkingText: (acc.thinkingText + stripped.thinking).trim(),
+		toolCalls: acc.toolCalls.length > 0 ? acc.toolCalls : undefined,
+		finishReason: acc.sawToolCall ? "tool_calls" : "stop",
 	};
 }

@@ -6,6 +6,14 @@ export interface ModelInfo {
 export interface StreamResult {
 	text: string;
 	thinkingText: string;
+	/** Native tool calls captured from a provider API response (if the provider supports real tool calling). */
+	toolCalls?: {
+		id?: string;
+		name: string;
+		arguments: string;
+	}[];
+	/** Whether the stream terminated with tool_calls (vs stop). */
+	finishReason?: "stop" | "tool_calls" | "length";
 }
 
 export class SessionExpiredError extends Error {
@@ -37,11 +45,18 @@ export class ProviderApiError extends Error {
 
 export interface WebProviderClient {
 	readonly providerId: string;
+	/** Whether this provider supports NATIVE tool calling through its backend API (not prompt-injection). */
+	readonly supportsNativeTools?: boolean;
 	init(): Promise<void>;
 	sendMessage(params: {
 		message: string;
 		model?: string;
 		signal?: AbortSignal;
+		tools?: unknown[];
+		toolChoice?: unknown;
+		messages?: unknown[];
+		reasoningEffort?: string | number | boolean;
+		stream?: boolean;
 	}): Promise<ReadableStream<Uint8Array>>;
 	parseStream(
 		body: ReadableStream<Uint8Array>,

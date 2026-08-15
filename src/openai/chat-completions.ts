@@ -24,6 +24,18 @@ function estimateTokens(text: string): number {
 	return Math.ceil(text.length / 4);
 }
 
+/**
+ * Decide the send strategy for a provider:
+ * - NATIVE: provider supports real tool calling through its backend API. Pass
+ *   the original messages + tools + tool_choice straight through and parse
+ *   native tool_calls / reasoning from its stream.
+ * - INJECTION: DOM-based provider (no native tool protocol). Flatten tools into
+ *   the prompt and parse tool_json blocks back out (existing converter path).
+ */
+function useNativeTools(client: WebProviderClient, body: ChatCompletionRequest): boolean {
+	return !!(client.supportsNativeTools && body.tools && body.tools.length > 0);
+}
+
 export async function handleChatCompletions(
 	body: ChatCompletionRequest,
 	client: WebProviderClient,
@@ -38,6 +50,11 @@ export async function handleChatCompletions(
 
 	const id = generateId();
 	const model = body.model;
+	const native = useNativeTools(client, body);
+
+	// For native providers we still build a text prompt for the sendMessage
+	// message field, but ALSO pass the structured tools + raw messages through.
+	// For DOM providers we keep the full prompt-injection path.
 	const { prompt, hasTools } = buildPromptFromMessages(body.messages, body.tools, body.tool_choice);
 
 	if (!prompt) {
@@ -45,8 +62,8 @@ export async function handleChatCompletions(
 	}
 
 	const handler = body.stream
-		? handleStreaming(id, model, prompt, hasTools, body, client)
-		: handleNonStreaming(id, model, prompt, hasTools, body, client);
+		? handleStreaming(id, model, prompt, hasTools, native, body, client)
+		: handleNonStreaming(id, model, prompt, hasTools, native, body, client);
 
 	const timeout = new Promise<Response>((resolve) =>
 		setTimeout(() => {
@@ -63,16 +80,49 @@ async function handleNonStreaming(
 	model: string,
 	prompt: string,
 	hasTools: boolean,
+	native: boolean,
 	body: ChatCompletionRequest,
 	client: WebProviderClient,
 ): Promise<Response> {
 	try {
-		const stream = await client.sendMessage({ message: prompt, model });
+		const stream = await client.sendMessage({
+			message: prompt,
+			model,
+			signal: undefined,
+			...(native
+				? {
+						tools: body.tools,
+						toolChoice: body.tool_choice,
+						messages: body.messages,
+						stream: false,
+					}
+				: {}),
+		});
 		const result = await client.parseStream(stream);
 
-		const { content, toolCalls, finishReason } = hasTools
-			? parseToolResponse(result.text, body.tools)
-			: { content: result.text, toolCalls: undefined, finishReason: "stop" as const };
+		let content: string | null;
+		let toolCalls: ToolCallOutput[] | undefined;
+		let finishReason: "stop" | "tool_calls" | "length";
+
+		if (native && result.toolCalls && result.toolCalls.length > 0) {
+			// NATIVE tool calls from the provider API.
+			toolCalls = result.toolCalls.map((tc) => ({
+				id: tc.id ?? `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+				type: "function" as const,
+				function: { name: tc.name, arguments: tc.arguments },
+			}));
+			content = null;
+			finishReason = "tool_calls";
+		} else if (hasTools) {
+			// Prompt-injection fallback (DOM providers / no native calls returned).
+			const parsed = parseToolResponse(result.text, body.tools);
+			content = parsed.content;
+			toolCalls = parsed.toolCalls;
+			finishReason = parsed.finishReason;
+		} else {
+			content = result.text;
+			finishReason = "stop";
+		}
 
 		const promptTokens = estimateTokens(prompt);
 		const completionTokens = estimateTokens(result.text);
@@ -90,6 +140,8 @@ async function handleNonStreaming(
 						role: "assistant",
 						content,
 						...(toolCalls ? { tool_calls: toolCalls } : {}),
+						// Surface reasoning/thinking text to the client (G8).
+						...(result.thinkingText ? { reasoning_content: result.thinkingText } : {}),
 					},
 					finish_reason: finishReason,
 				},
@@ -159,16 +211,25 @@ async function handleStreaming(
 	model: string,
 	prompt: string,
 	hasTools: boolean,
+	native: boolean,
 	body: ChatCompletionRequest,
 	client: WebProviderClient,
 ): Promise<Response> {
-	// Await sendMessage BEFORE creating the SSE stream so that pre-stream
-	// errors (auth, rate-limit, model-not-available) return a proper HTTP
-	// error status instead of being buried inside an SSE event that the
-	// client cannot parse as a ChatCompletionChunk.
 	let providerStream: ReadableStream<Uint8Array>;
 	try {
-		providerStream = await client.sendMessage({ message: prompt, model });
+		providerStream = await client.sendMessage({
+			message: prompt,
+			model,
+			signal: undefined,
+			...(native
+				? {
+						tools: body.tools,
+						toolChoice: body.tool_choice,
+						messages: body.messages,
+						stream: true,
+					}
+				: {}),
+		});
 	} catch (err) {
 		return providerErrorResponse(err, "streaming (pre-stream)");
 	}
@@ -179,7 +240,32 @@ async function handleStreaming(
 			try {
 				w.writeChunk(id, model, [{ index: 0, delta: { role: "assistant" }, finish_reason: null }]);
 
-				if (!hasTools) {
+				if (native) {
+					// NATIVE path: stream content deltas live, then emit reasoning
+					// and tool_calls at the end (parseStream collects them).
+					const collected: string[] = [];
+					const result = await client.parseStream(providerStream, (delta) => {
+						collected.push(delta);
+						w.writeChunk(id, model, [{ index: 0, delta: { content: delta }, finish_reason: null }]);
+					});
+					if (result.thinkingText) {
+						// Emit reasoning in one delta (after content, per OpenAI convention).
+						w.writeChunk(id, model, [
+							{ index: 0, delta: { reasoning_content: result.thinkingText }, finish_reason: null },
+						]);
+					}
+					if (result.toolCalls && result.toolCalls.length > 0) {
+						const calls: ToolCallOutput[] = result.toolCalls.map((tc) => ({
+							id: tc.id ?? `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+							type: "function" as const,
+							function: { name: tc.name, arguments: tc.arguments },
+						}));
+						emitToolCallDeltas(w, id, model, calls);
+						w.writeChunk(id, model, [{ index: 0, delta: {}, finish_reason: "tool_calls" }]);
+					} else {
+						w.writeChunk(id, model, [{ index: 0, delta: {}, finish_reason: "stop" }]);
+					}
+				} else if (!hasTools) {
 					await streamWithoutTools(w, id, model, providerStream, client);
 				} else {
 					await streamWithTools(w, id, model, providerStream, body, client);
@@ -206,9 +292,16 @@ async function streamWithoutTools(
 	providerStream: ReadableStream<Uint8Array>,
 	client: WebProviderClient,
 ) {
-	await client.parseStream(providerStream, (delta) => {
+	const chunks: string[] = [];
+	const result = await client.parseStream(providerStream, (delta) => {
+		chunks.push(delta);
 		w.writeChunk(id, model, [{ index: 0, delta: { content: delta }, finish_reason: null }]);
 	});
+	if (result.thinkingText) {
+		w.writeChunk(id, model, [
+			{ index: 0, delta: { reasoning_content: result.thinkingText }, finish_reason: null },
+		]);
+	}
 	w.writeChunk(id, model, [{ index: 0, delta: {}, finish_reason: "stop" }]);
 }
 
@@ -229,6 +322,11 @@ async function streamWithTools(
 	} else {
 		if (content) {
 			w.writeChunk(id, model, [{ index: 0, delta: { content }, finish_reason: null }]);
+		}
+		if (result.thinkingText) {
+			w.writeChunk(id, model, [
+				{ index: 0, delta: { reasoning_content: result.thinkingText }, finish_reason: null },
+			]);
 		}
 		w.writeChunk(id, model, [{ index: 0, delta: {}, finish_reason: "stop" }]);
 	}

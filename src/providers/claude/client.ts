@@ -5,6 +5,7 @@
  */
 import type { Page } from "playwright-core";
 import { pasteText } from "../../browser/dom-input.ts";
+import { createPushStream } from "../../browser/push-stream.ts";
 import { BaseApiClient } from "../factory/base-api-client.ts";
 import type { ApiClientConfig, NormalizedSendParams } from "../factory/types.ts";
 import { parseCookieHeader } from "../shared/cookie-parser.ts";
@@ -38,6 +39,7 @@ export class ClaudeWebClient extends BaseApiClient<ClaudeWebAuth> {
 	private readonly baseUrl = "https://claude.ai/api";
 	private organizationId?: string;
 	private cookie: string;
+	private _pushKey: string | null = null;
 
 	constructor(auth: ClaudeWebAuth) {
 		super(auth);
@@ -73,6 +75,32 @@ export class ClaudeWebClient extends BaseApiClient<ClaudeWebAuth> {
 		const orgId = this.organizationId;
 		const baseUrl = this.baseUrl;
 		const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+		// Native Anthropic-style tools passed through when the caller supplied them.
+		// Anthropic web API expects bare: { name, description, input_schema } (no type field).
+		const nativeTools = (params.tools ?? []) as {
+			type?: string;
+			function?: { name: string; description?: string; parameters?: unknown };
+		}[];
+		const anthropicTools = nativeTools.length
+			? nativeTools.map((t) => ({
+					name: t.function?.name ?? "",
+					description: t.function?.description ?? "",
+					input_schema: t.function?.parameters ?? { type: "object", properties: {} },
+				}))
+			: [];
+		// Anthropic web API may not support tool_choice; omit for now.
+		const toolChoice = undefined;
+
+		// Push-stream: browser reader calls the exposed Node function per chunk
+		// → true letter-by-letter streaming with zero polling.
+		const pushStream = createPushStream();
+		const pushKey = pushStream.pushKey;
+		this._pushKey = pushKey;
+		(globalThis as any).__tfg_push_registry = (globalThis as any).__tfg_push_registry || {};
+		(globalThis as any).__tfg_push_registry[pushKey] = { stream: pushStream.stream, close: pushStream.close };
+		await page.exposeFunction(pushKey, (chunk: string) => {
+			pushStream.push(chunk);
+		});
 
 		const evaluatePromise = page.evaluate(
 			async ({
@@ -82,6 +110,9 @@ export class ClaudeWebClient extends BaseApiClient<ClaudeWebAuth> {
 				model: mdl,
 				timezone: tz,
 				message: msg,
+				tools: toolsArg,
+				toolChoice: toolChoiceArg,
+				pushFn,
 			}) => {
 				const createUrl = org
 					? `${apiBase}/organizations/${org}/chat_conversations`
@@ -104,23 +135,25 @@ export class ClaudeWebClient extends BaseApiClient<ClaudeWebAuth> {
 				const completionUrl = org
 					? `${apiBase}/organizations/${org}/chat_conversations/${conv.uuid}/completion`
 					: `${apiBase}/chat_conversations/${conv.uuid}/completion`;
+				const body: Record<string, unknown> = {
+					prompt: msg,
+					parent_message_uuid: "00000000-0000-4000-8000-000000000000",
+					model: mdl,
+					timezone: tz,
+					rendering_mode: "messages",
+					attachments: [],
+					files: [],
+					locale: "en-US",
+					personalized_styles: [],
+					sync_sources: [],
+					tools: toolsArg,
+				};
+				if (toolChoiceArg) body.tool_choice = toolChoiceArg;
 				const completionRes = await fetch(completionUrl, {
 					method: "POST",
 					headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
 					credentials: "include",
-					body: JSON.stringify({
-						prompt: msg,
-						parent_message_uuid: "00000000-0000-4000-8000-000000000000",
-						model: mdl,
-						timezone: tz,
-						rendering_mode: "messages",
-						attachments: [],
-						files: [],
-						locale: "en-US",
-						personalized_styles: [],
-						sync_sources: [],
-						tools: [],
-					}),
+					body: JSON.stringify(body),
 				});
 				if (!completionRes.ok) {
 					const text = await completionRes.text();
@@ -134,13 +167,21 @@ export class ClaudeWebClient extends BaseApiClient<ClaudeWebAuth> {
 				if (!reader)
 					return { ok: false as const, status: 500, error: "No response body from Claude API" };
 				const decoder = new TextDecoder();
-				let fullText = "";
-				while (true) {
-					const { done, value } = await reader.read();
-					if (done) break;
-					fullText += decoder.decode(value, { stream: true });
+				// Push EVERY read chunk to the Node side immediately via the exposed
+				// function → true letter-by-letter streaming (no polling, no buffer).
+				try {
+					while (true) {
+						const { done, value } = await reader.read();
+						if (done) break;
+						const text = decoder.decode(value, { stream: true });
+						if (text) (globalThis as Record<string, any>)[pushFn]?.(text);
+					}
+				} catch (e) {
+					(globalThis as Record<string, any>)[pushFn]?.(
+						`__TFG_ERR__${e instanceof Error ? e.message : String(e)}`,
+					);
 				}
-				return { ok: true as const, data: fullText };
+				return { ok: true as const, data: "pushed" };
 			},
 			{
 				baseUrl,
@@ -149,9 +190,24 @@ export class ClaudeWebClient extends BaseApiClient<ClaudeWebAuth> {
 				model: params.model,
 				timezone,
 				message: params.message,
+				tools: anthropicTools,
+				toolChoice,
+				pushFn: pushKey,
 			},
 		);
-		return (await withTimeout(evaluatePromise, SEND_TIMEOUT_MS, "Claude request")) as EvalResult;
+		// Fire-and-forget: the evaluate runs the full read loop in the browser,
+		// pushing chunks live. Close the push stream when the loop finishes.
+		evaluatePromise
+			.then(() => {
+				pushStream.close();
+				delete (globalThis as any).__tfg_push_registry?.[pushKey];
+			})
+			.catch((e) => {
+				console.error(`[ClaudeWeb] stream loop error: ${e instanceof Error ? e.message : String(e)}`);
+				pushStream.close();
+				delete (globalThis as any).__tfg_push_registry?.[pushKey];
+			});
+		return { ok: true, data: "pushed" };
 	}
 
 	/**
@@ -165,6 +221,11 @@ export class ClaudeWebClient extends BaseApiClient<ClaudeWebAuth> {
 		message: string;
 		model?: string;
 		signal?: AbortSignal;
+		tools?: unknown[];
+		toolChoice?: unknown;
+		messages?: unknown[];
+		reasoningEffort?: string | number | boolean;
+		stream?: boolean;
 	}): Promise<ReadableStream<Uint8Array>> {
 		try {
 			return await this.doSendMessage(params);
@@ -185,12 +246,22 @@ export class ClaudeWebClient extends BaseApiClient<ClaudeWebAuth> {
 		message: string;
 		model?: string;
 		signal?: AbortSignal;
+		tools?: unknown[];
+		toolChoice?: unknown;
+		messages?: unknown[];
+		reasoningEffort?: string | number | boolean;
+		stream?: boolean;
 	}): Promise<ReadableStream<Uint8Array>> {
 		const page = await this.getPage();
 		const normalized: NormalizedSendParams = {
 			message: params.message,
 			model: params.model || this.config.defaultModel,
 			signal: params.signal,
+			tools: params.tools,
+			toolChoice: params.toolChoice,
+			messages: params.messages,
+			reasoningEffort: params.reasoningEffort,
+			stream: params.stream,
 		};
 		const result = await this.callApi(page, normalized);
 		if (!result.ok) {
@@ -229,6 +300,18 @@ export class ClaudeWebClient extends BaseApiClient<ClaudeWebAuth> {
 			throw new Error(errorMessage);
 		}
 		console.log(`[ClaudeWeb] Response length: ${result.data?.length || 0} bytes`);
+
+		// Live streaming: callApi registered a push stream (exposeFunction) and
+		// started the browser read loop. Return that stream directly — chunks
+		// arrive letter-by-letter with no polling.
+		const pushKey = this._pushKey;
+		this._pushKey = null;
+		if (!pushKey) return textToStream(result.data ?? "");
+
+		// The push stream was created in callApi; we re-attach it here via the
+		// registry that callApi stored.
+		const reg = (globalThis as any).__tfg_push_registry?.[pushKey];
+		if (reg?.stream) return reg.stream;
 		return textToStream(result.data ?? "");
 	}
 

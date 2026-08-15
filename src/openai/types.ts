@@ -78,6 +78,8 @@ export interface ResponseMessage {
 	role: "assistant";
 	content: string | null;
 	tool_calls?: ToolCallOutput[];
+	/** Reasoning/thinking text surfaced to the client (deepseek-reasoner, GLM-4-think, Claude thinking, etc.). */
+	reasoning_content?: string | null;
 }
 
 export interface ToolCallOutput {
@@ -115,6 +117,8 @@ export interface ChunkDelta {
 	role?: "assistant";
 	content?: string | null;
 	tool_calls?: ToolCallDelta[];
+	/** Incremental reasoning/thinking text (provider-supported). */
+	reasoning_content?: string | null;
 }
 
 export interface ToolCallDelta {

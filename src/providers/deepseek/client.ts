@@ -120,6 +120,11 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 		message: string;
 		model?: string;
 		signal?: AbortSignal;
+		tools?: unknown[];
+		toolChoice?: unknown;
+		messages?: unknown[];
+		reasoningEffort?: string | number | boolean;
+		stream?: boolean;
 	}): Promise<ReadableStream<Uint8Array>> {
 		await this.getPage();
 		if (!this.chatSessionId) {
@@ -132,6 +137,9 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 			message: params.message,
 			model: params.model,
 			signal: params.signal,
+			tools: params.tools,
+			toolChoice: params.toolChoice,
+			stream: params.stream,
 		});
 		if (!body) throw new Error("DeepSeek Web API returned empty response body");
 		return body;
@@ -298,6 +306,9 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 		preempt?: boolean;
 		parentMessageId?: string | number | null;
 		signal?: AbortSignal;
+		tools?: unknown[];
+		toolChoice?: unknown;
+		stream?: boolean;
 	}) {
 		const targetPath = "/api/v0/chat/completion";
 		const challenge = await this.createPowChallenge(targetPath);
@@ -316,6 +327,11 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 			search_enabled: params.searchEnabled ?? true,
 			preempt: params.preempt ?? false,
 		};
+		// DeepSeek's web API does not accept OpenAI-style tools in the chat completion
+		// body; tool semantics are handled by the gateway's tool-calling layer on top.
+		// (Tools are appended by the converter into the prompt for DOM/web endpoints.)
+		void params.tools;
+		void params.toolChoice;
 		const evalPromise = page.evaluate(
 			async ({
 				path,
@@ -341,13 +357,37 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 				const reader = res.body?.getReader();
 				if (!reader) return { ok: false as const, status: 500, error: "No response body" };
 				const decoder = new TextDecoder();
-				let fullText = "";
-				while (true) {
-					const { done, value } = await reader.read();
-					if (done) break;
-					fullText += decoder.decode(value, { stream: true });
-				}
-				return { ok: true as const, data: fullText };
+				// Stream chunks into a shared window buffer; Node side polls for live deltas.
+				const streamKey = `__tfg_ds_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+				(globalThis as Record<string, unknown>)[streamKey] = {
+					chunks: [] as string[],
+					done: false,
+					error: undefined as string | undefined,
+				};
+				const sink = (globalThis as Record<string, any>)[streamKey];
+				(async () => {
+					try {
+						while (true) {
+							const { done: d, value } = await reader.read();
+							if (d) break;
+							sink.chunks.push(decoder.decode(value, { stream: true }));
+						}
+					} catch (e) {
+						sink.error = e instanceof Error ? e.message : String(e);
+					} finally {
+						sink.done = true;
+					}
+				})();
+				// Return IMMEDIATELY — do NOT wait for the stream to finish. The
+				// background reader keeps filling the window buffer while the Node
+				// side polls it for live deltas (true line-by-line streaming).
+				return {
+					ok: true as const,
+					data: JSON.stringify({
+						streamKey,
+						bytes: 0,
+					}),
+				};
 			},
 			{
 				path: targetPath,
@@ -365,7 +405,52 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 			throwIfSessionExpired(this.providerId, result.status);
 			throw new Error(`Chat completion failed: ${result.status} ${result.error}`);
 		}
-		return textToStream(result.data);
+
+		// Live streaming: poll the window buffer for incremental chunks.
+		let streamInfo: { streamKey?: string } = {};
+		try {
+			streamInfo = JSON.parse(result.data);
+		} catch {
+			return textToStream(result.data ?? "");
+		}
+		const streamKey = streamInfo.streamKey;
+		if (!streamKey) return textToStream(result.data ?? "");
+		const encoder = new TextEncoder();
+		return new ReadableStream<Uint8Array>({
+			start: async (controller) => {
+				let lastLen = 0;
+				let done = false;
+				let streamError: string | undefined;
+				try {
+					while (!done) {
+						if (params.signal?.aborted) throw new Error("DeepSeek request cancelled");
+						const poll = await page.evaluate(
+							({ key, from }: { key: string; from: number }) => {
+								const sink = (globalThis as Record<string, any>)[key] as
+									| { chunks: string[]; done: boolean; error?: string }
+									| undefined;
+								if (!sink) return { done: true, error: "stream buffer missing", chunks: [] as string[] };
+								return { done: sink.done, error: sink.error, chunks: sink.chunks.slice(from) };
+							},
+							{ key: streamKey, from: lastLen },
+						);
+						for (const chunk of poll.chunks) controller.enqueue(encoder.encode(chunk));
+						lastLen += poll.chunks.reduce((n, c) => n + c.length, 0);
+						done = poll.done;
+						streamError = poll.error;
+						if (!done) await new Promise((r) => setTimeout(r, 100));
+					}
+					if (streamError) throw new Error(streamError);
+					controller.close();
+				} catch (e) {
+					controller.error(e instanceof Error ? e : new Error(String(e)));
+				} finally {
+					await page.evaluate((key) => {
+						delete (globalThis as Record<string, any>)[key];
+					}, streamKey).catch(() => {});
+				}
+			},
+		});
 	}
 
 	async uploadFile(fileData: Buffer, fileName: string) {

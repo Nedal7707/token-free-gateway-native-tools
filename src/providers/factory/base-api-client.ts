@@ -21,6 +21,9 @@ export abstract class BaseApiClient<TAuth = unknown> implements WebProviderClien
 	abstract readonly providerId: string;
 	protected abstract readonly config: ApiClientConfig;
 
+	/** Default: API-based clients support native tool calling (subclasses may opt out). */
+	readonly supportsNativeTools = true;
+
 	protected page: Page | null = null;
 	protected readonly auth: TAuth;
 
@@ -75,12 +78,22 @@ export abstract class BaseApiClient<TAuth = unknown> implements WebProviderClien
 		message: string;
 		model?: string;
 		signal?: AbortSignal;
+		tools?: unknown[];
+		toolChoice?: unknown;
+		messages?: unknown[];
+		reasoningEffort?: string | number | boolean;
+		stream?: boolean;
 	}): Promise<ReadableStream<Uint8Array>> {
 		const page = await this.getPage();
 		const normalized: NormalizedSendParams = {
 			message: params.message,
 			model: params.model || this.config.defaultModel,
 			signal: params.signal,
+			tools: params.tools,
+			toolChoice: params.toolChoice,
+			messages: params.messages,
+			reasoningEffort: params.reasoningEffort,
+			stream: params.stream,
 		};
 
 		try {

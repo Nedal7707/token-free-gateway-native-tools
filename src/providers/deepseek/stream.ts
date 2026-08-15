@@ -21,6 +21,9 @@ export async function parseDeepSeekStream(
 
 	let currentMode: "text" | "thinking" | "tool_call" = "text";
 	let tagBuffer = "";
+	let toolCallBuffer = "";
+	let toolCallName = "";
+	let sawToolCall = false;
 
 	const emitText = (delta: string) => {
 		if (!delta || JUNK_TOKENS.has(delta)) return;
@@ -37,6 +40,10 @@ export async function parseDeepSeekStream(
 		if (!delta) return;
 		if (forceType === "thinking") {
 			emitThinking(delta);
+			return;
+		}
+		if (currentMode === "tool_call") {
+			toolCallBuffer += delta;
 			return;
 		}
 		tagBuffer += delta;
@@ -91,6 +98,9 @@ export async function parseDeepSeekStream(
 					currentMode = "text";
 				} else if (first.type === "tool_start") {
 					currentMode = "tool_call";
+					sawToolCall = true;
+					toolCallName = first.name ?? "";
+					toolCallBuffer = "";
 				} else if (first.type === "tool_end") {
 					currentMode = "text";
 				}
@@ -235,5 +245,25 @@ export async function parseDeepSeekStream(
 		reader.releaseLock();
 	}
 
-	return { text: text.trim(), thinkingText: thinkingText.trim() };
+	// Parse any accumulated tool call JSON (e.g. {"tool":"name","parameters":{...}})
+	let toolCalls: { id?: string; name: string; arguments: string }[] | undefined;
+	if (sawToolCall && toolCallBuffer.trim()) {
+		try {
+			const cleaned = toolCallBuffer.trim();
+			const obj = JSON.parse(cleaned.startsWith("{") ? cleaned : `{${cleaned}}`);
+			const name = obj.tool ?? obj.name ?? toolCallName;
+			if (name) {
+				toolCalls = [{ id: undefined, name: String(name), arguments: JSON.stringify(obj.parameters ?? obj.arguments ?? {}) }];
+			}
+		} catch {
+			// Unparseable tool buffer — fall back to text.
+		}
+	}
+
+	return {
+		text: text.trim(),
+		thinkingText: thinkingText.trim(),
+		toolCalls,
+		finishReason: toolCalls && toolCalls.length > 0 ? "tool_calls" : "stop",
+	};
 }
