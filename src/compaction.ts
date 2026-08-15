@@ -12,6 +12,7 @@ import {
 	compactRequest,
 	contextWindowFor,
 	estimateTokens,
+	sanitizeMaxTokens,
 } from "./shared/compaction.mjs";
 
-export { compactMessages, compactRequest, contextWindowFor, estimateTokens };
+export { compactMessages, compactRequest, contextWindowFor, estimateTokens, sanitizeMaxTokens };

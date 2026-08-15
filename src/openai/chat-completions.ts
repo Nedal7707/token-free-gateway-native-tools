@@ -1,7 +1,7 @@
 import { evictProviderClient } from "../providers/registry.ts";
 import type { WebProviderClient } from "../providers/types.ts";
 import { ProviderApiError, SessionExpiredError } from "../providers/types.ts";
-import { compactMessages } from "../compaction.ts";
+import { compactMessages, sanitizeMaxTokens } from "../compaction.ts";
 import { buildPromptFromMessages, parseToolResponse } from "../tool-calling/converter.ts";
 import { makeChunk, sseDone, sseEvent, sseHeaders } from "./sse.ts";
 import type {
@@ -76,6 +76,12 @@ export async function handleChatCompletions(
 			`[chat-completions] auto-compacted: ${droppedTokens} tokens dropped (budget ${budget}) for model ${model}`,
 		);
 		body = { ...body, messages: compactedMessages };
+	}
+	// Raise tiny/missing max_tokens so reasoning models don't burn their whole
+	// output budget on thinking (returns empty content otherwise).
+	const withSaneTokens = sanitizeMaxTokens(body);
+	if (withSaneTokens !== body) {
+		body = withSaneTokens;
 	}
 
 	// For native providers we still build a text prompt for the sendMessage

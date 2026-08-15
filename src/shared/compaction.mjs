@@ -391,3 +391,49 @@ export function compactRequest(body, modelField = "model") {
 	};
 	return next;
 }
+
+// Reasonable minimum output budget per request. Reasoning models spend a
+// large share of max_tokens on thinking; a tiny cap (e.g. 20) makes them
+// return an empty assistant turn ("finish_reason: length", no content).
+// We only RAISE too-small caps — never lower a client's explicit larger cap.
+const MIN_MAX_TOKENS = 4_096;
+// Per-model ceilings so we never exceed a model's output limit. Unknown
+// models get a conservative 16k; known big-window models get 64k.
+const MAX_TOKENS_CEILING = {
+	"claude-sonnet-4-6": 64_000,
+	"claude-opus-4-6": 64_000,
+	"claude-haiku-4-6": 64_000,
+	"gpt-5.6-luna": 64_000,
+	"gpt-5.6-sol": 64_000,
+	"gpt-5.6-terra": 64_000,
+	"kimi-k3": 64_000,
+	"glm-5.3": 64_000,
+	"deepseek-v4-flash": 64_000,
+	"deepseek-v4-pro": 64_000,
+	"gemini-3.7-flash": 64_000,
+};
+
+/**
+ * Sanitize a chat-completion body's max_tokens:
+ * - missing → a per-model sane default (never 0)
+ * - tiny (< MIN_MAX_TOKENS) → raised to MIN_MAX_TOKENS so reasoning models
+ *   still have output room after thinking
+ * - over the per-model ceiling → capped to the ceiling
+ * Returns a new body if changed, otherwise the original reference.
+ */
+export function sanitizeMaxTokens(body) {
+	if (!body || typeof body !== "object") return body;
+	const model = String(body.model || "");
+	const cap = MAX_TOKENS_CEILING[model] ?? 16_000;
+	const current = body.max_tokens;
+	let next;
+	if (current === undefined || current === null) {
+		next = Math.min(cap, 16_000);
+	} else if (typeof current === "number" && current < MIN_MAX_TOKENS) {
+		next = Math.min(MIN_MAX_TOKENS, cap);
+	} else if (typeof current === "number" && current > cap) {
+		next = cap;
+	}
+	if (next === undefined || next === current) return body;
+	return { ...body, max_tokens: next };
+}
