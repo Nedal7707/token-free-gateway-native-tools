@@ -1,6 +1,7 @@
 import { evictProviderClient } from "../providers/registry.ts";
 import type { WebProviderClient } from "../providers/types.ts";
 import { ProviderApiError, SessionExpiredError } from "../providers/types.ts";
+import { compactMessages } from "../compaction.ts";
 import { buildPromptFromMessages, parseToolResponse } from "../tool-calling/converter.ts";
 import { makeChunk, sseDone, sseEvent, sseHeaders } from "./sse.ts";
 import type {
@@ -31,9 +32,21 @@ function estimateTokens(text: string): number {
  *   native tool_calls / reasoning from its stream.
  * - INJECTION: DOM-based provider (no native tool protocol). Flatten tools into
  *   the prompt and parse tool_json blocks back out (existing converter path).
+ *
+ * NOTE: the native path is only used when the provider's own API accepts the
+ * OpenAI-style tool schema AND the push/stream loop has been verified to
+ * terminate with tool_use blocks. Claude Web's native path hangs (the API
+ * waits on the tool_choice and the push stream never closes), so it falls back
+ * to injection. Injection is the tested, deterministic path (tool_json blocks).
  */
 function useNativeTools(client: WebProviderClient, body: ChatCompletionRequest): boolean {
-	return !!(client.supportsNativeTools && body.tools && body.tools.length > 0);
+	if (!body.tools || body.tools.length === 0) return false;
+	if (!client.supportsNativeTools) return false;
+	// Claude Web's native tool path is unverified and hangs (observed 300s
+	// timeout); its DOM/API response is a single prompt string, so injection is
+	// the reliable path. Add providers here as their native path is verified.
+	if (client.providerId === "claude-web" || client.providerId === "chatgpt-web") return false;
+	return true;
 }
 
 export async function handleChatCompletions(
@@ -51,6 +64,19 @@ export async function handleChatCompletions(
 	const id = generateId();
 	const model = body.model;
 	const native = useNativeTools(client, body);
+
+	// Auto-compaction: trim old turns when the request exceeds the model's
+	// context window, so long agent sessions never hard-fail the web provider.
+	const { messages: compactedMessages, compacted, droppedTokens, budget } = compactMessages(
+		model,
+		body.messages,
+	);
+	if (compacted) {
+		console.log(
+			`[chat-completions] auto-compacted: ${droppedTokens} tokens dropped (budget ${budget}) for model ${model}`,
+		);
+		body = { ...body, messages: compactedMessages };
+	}
 
 	// For native providers we still build a text prompt for the sendMessage
 	// message field, but ALSO pass the structured tools + raw messages through.
