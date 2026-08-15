@@ -7,6 +7,7 @@ import { makeChunk, sseDone, sseEvent, sseHeaders } from "./sse.ts";
 import type {
 	ChatCompletionRequest,
 	ChatCompletionResponse,
+	ContentPart,
 	ToolCallDelta,
 	ToolCallOutput,
 } from "./types.ts";
@@ -23,6 +24,23 @@ function generateId(): string {
 
 function estimateTokens(text: string): number {
 	return Math.ceil(text.length / 4);
+}
+
+/** Plain text of the last user message (no "Human:" wrapper) for DOM providers. */
+function extractLastUserMessage(messages: ChatCompletionRequest["messages"]): string {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const m = messages[i];
+		if (m?.role !== "user") continue;
+		const content = (m as { content?: string | ContentPart[] }).content;
+		if (typeof content === "string") return content;
+		if (Array.isArray(content)) {
+			return content
+				.map((p) => (typeof p === "string" ? p : p?.text ?? ""))
+				.filter(Boolean)
+				.join(" ");
+		}
+	}
+	return "";
 }
 
 /**
@@ -93,9 +111,18 @@ export async function handleChatCompletions(
 		return jsonError("Could not construct prompt from messages", 400);
 	}
 
+	// DOM providers (gemini/kimi/qwen/perplexity) type the message into a chat
+	// box — the Anthropic-style "Human:" prefix breaks them (the UI shows it as
+	// literal text and never sends). Use the plain last user message instead.
+	const isDom = !client.supportsNativeTools;
+	const domPrompt = isDom ? extractLastUserMessage(body.messages) : prompt;
+	if (isDom && !domPrompt) {
+		return jsonError("Could not construct prompt from messages", 400);
+	}
+
 	const handler = body.stream
-		? handleStreaming(id, model, prompt, hasTools, native, body, client)
-		: handleNonStreaming(id, model, prompt, hasTools, native, body, client);
+		? handleStreaming(id, model, isDom ? domPrompt! : prompt, hasTools, native, body, client)
+		: handleNonStreaming(id, model, isDom ? domPrompt! : prompt, hasTools, native, body, client);
 
 	const timeout = new Promise<Response>((resolve) =>
 		setTimeout(() => {

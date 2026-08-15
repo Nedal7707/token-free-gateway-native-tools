@@ -1,12 +1,11 @@
 import crypto from "node:crypto";
+import https from "node:https";
 import type { Page } from "playwright-core";
 import { BaseApiClient } from "../factory/base-api-client.ts";
 import type { ApiClientConfig, NormalizedSendParams } from "../factory/types.ts";
 import { parseCookieHeader } from "../shared/cookie-parser.ts";
 import { throwIfSessionExpired } from "../shared/error-guard.ts";
 import type { EvalResult } from "../shared/eval-helpers.ts";
-import { raceAbortSignal } from "../shared/eval-helpers.ts";
-import { textToStream } from "../shared/stream-helpers.ts";
 import type { StreamResult } from "../types.ts";
 import type { DeepSeekWebCredentials } from "./auth.ts";
 import { parseDeepSeekStream } from "./stream.ts";
@@ -28,6 +27,8 @@ export interface DeepSeekChatSession {
 	chat_session_id: string;
 	title: string;
 	id?: string;
+	seq_id?: number;
+	current_message_id?: string | number | null;
 }
 
 interface DeepSeekWasmExports {
@@ -82,18 +83,21 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 
 	private browserHeaders(): Record<string, string> {
 		const ua = this.auth.userAgent || "Mozilla/5.0";
+		const creds = this.auth as DeepSeekWebCredentials;
 		return {
 			"User-Agent": ua,
 			"Content-Type": "application/json",
 			Accept: "*/*",
-			...(this.auth.bearer ? { Authorization: `Bearer ${this.auth.bearer}` } : {}),
+			...(creds.bearer ? { Authorization: `Bearer ${creds.bearer}` } : {}),
+			...(creds.hifLeim ? { "x-hif-leim": creds.hifLeim } : {}),
 			Referer: "https://chat.deepseek.com/",
 			Origin: "https://chat.deepseek.com",
 			"x-client-platform": "web",
-			"x-client-version": "1.7.0",
+			"x-client-bundle-id": "com.deepseek.chat",
+			"x-client-version": "2.3.0",
 			"x-app-version": "20241129.1",
-			"x-client-locale": "zh_CN",
-			"x-client-timezone-offset": "28800",
+			"x-client-locale": "en_US",
+			"x-client-timezone-offset": "10800",
 		};
 	}
 
@@ -130,6 +134,8 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 		if (!this.chatSessionId) {
 			const session = await this.createChatSession();
 			this.chatSessionId = session.chat_session_id || "";
+			// Fresh session: parent_message_id stays null (matches the web UI
+			// for a brand-new conversation).
 		}
 		const body = await this.chatCompletions({
 			sessionId: this.chatSessionId,
@@ -288,10 +294,18 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 		if (!evalResult.ok)
 			throw new Error(`Failed to create chat session: ${evalResult.status} ${evalResult.error}`);
 		const data = evalResult.data as DeepSeekChatSessionResponse;
-		const sessionId = data.data?.biz_data?.id || data.data?.biz_data?.chat_session_id || "";
+		const biz = data.data?.biz_data as {
+			id?: string;
+			chat_session_id?: string;
+			seq_id?: number;
+			chat_session?: { id?: string; seq_id?: number };
+		};
+		const sessionId =
+			biz?.id || biz?.chat_session_id || biz?.chat_session?.id || "";
 		return {
 			biz_id: data.data?.biz_data?.biz_id || "",
 			title: data.data?.biz_data?.title || "",
+			seq_id: biz?.seq_id ?? biz?.chat_session?.seq_id,
 			...data.data?.biz_data,
 			chat_session_id: sessionId,
 		};
@@ -321,10 +335,13 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 		const requestBody = {
 			chat_session_id: params.sessionId,
 			parent_message_id: params.parentMessageId ?? null,
+			model_type: null,
 			prompt: params.message,
 			ref_file_ids: params.fileIds || [],
-			thinking_enabled: !(params.model === "deepseek-chat" && !params.model?.includes("reasoning")),
+			// Match the web UI: flash models answer with thinking disabled.
+			thinking_enabled: false,
 			search_enabled: params.searchEnabled ?? true,
+			action: null,
 			preempt: params.preempt ?? false,
 		};
 		// DeepSeek's web API does not accept OpenAI-style tools in the chat completion
@@ -332,124 +349,91 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 		// (Tools are appended by the converter into the prompt for DOM/web endpoints.)
 		void params.tools;
 		void params.toolChoice;
-		const evalPromise = page.evaluate(
-			async ({
-				path,
-				pow,
-				headers,
-				bodyJson,
-			}: {
-				path: string;
-				pow: string;
-				headers: Record<string, string>;
-				bodyJson: string;
-			}) => {
-				const res = await fetch(`https://chat.deepseek.com${path}`, {
-					method: "POST",
-					credentials: "include",
-					headers: { ...headers, "Content-Type": "application/json", "x-ds-pow-response": pow },
-					body: bodyJson,
-				});
-				if (!res.ok) {
-					const errorText = await res.text();
-					return { ok: false as const, status: res.status, error: errorText };
-				}
-				const reader = res.body?.getReader();
-				if (!reader) return { ok: false as const, status: 500, error: "No response body" };
-				const decoder = new TextDecoder();
-				// Stream chunks into a shared window buffer; Node side polls for live deltas.
-				const streamKey = `__tfg_ds_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-				(globalThis as Record<string, unknown>)[streamKey] = {
-					chunks: [] as string[],
-					done: false,
-					error: undefined as string | undefined,
-				};
-				const sink = (globalThis as Record<string, any>)[streamKey];
-				(async () => {
-					try {
-						while (true) {
-							const { done: d, value } = await reader.read();
-							if (d) break;
-							sink.chunks.push(decoder.decode(value, { stream: true }));
-						}
-					} catch (e) {
-						sink.error = e instanceof Error ? e.message : String(e);
-					} finally {
-						sink.done = true;
-					}
-				})();
-				// Return IMMEDIATELY — do NOT wait for the stream to finish. The
-				// background reader keeps filling the window buffer while the Node
-				// side polls it for live deltas (true line-by-line streaming).
-				return {
-					ok: true as const,
-					data: JSON.stringify({
-						streamKey,
-						bytes: 0,
-					}),
-				};
-			},
-			{
-				path: targetPath,
-				pow: powResponse,
-				headers: headerRecord,
-				bodyJson: JSON.stringify(requestBody),
-			},
-		);
-		const result = (await raceAbortSignal(
-			evalPromise,
+		// NOTE: we fetch from NODE (https) instead of page.evaluate. The deepseek
+		// page's service worker intercepts in-page fetches and strips the
+		// Authorization header, which made the API return an empty stream.
+		const creds = this.auth as DeepSeekWebCredentials;
+		const reqHeaders: Record<string, string> = {
+			...headerRecord,
+			Cookie: creds.cookie || "",
+			"Content-Type": "application/json",
+			"x-ds-pow-response": powResponse,
+		};
+		return this.fetchCompletionFromNode(
+			JSON.stringify(requestBody),
+			reqHeaders,
 			params.signal,
-			"DeepSeek chat completion",
-		)) as BrowserEvalStringResult;
-		if (!result.ok) {
-			throwIfSessionExpired(this.providerId, result.status);
-			throw new Error(`Chat completion failed: ${result.status} ${result.error}`);
-		}
+		);
+	}
 
-		// Live streaming: poll the window buffer for incremental chunks.
-		let streamInfo: { streamKey?: string } = {};
-		try {
-			streamInfo = JSON.parse(result.data);
-		} catch {
-			return textToStream(result.data ?? "");
-		}
-		const streamKey = streamInfo.streamKey;
-		if (!streamKey) return textToStream(result.data ?? "");
-		const encoder = new TextEncoder();
-		return new ReadableStream<Uint8Array>({
-			start: async (controller) => {
-				let lastLen = 0;
-				let done = false;
-				let streamError: string | undefined;
-				try {
-					while (!done) {
-						if (params.signal?.aborted) throw new Error("DeepSeek request cancelled");
-						const poll = await page.evaluate(
-							({ key, from }: { key: string; from: number }) => {
-								const sink = (globalThis as Record<string, any>)[key] as
-									| { chunks: string[]; done: boolean; error?: string }
-									| undefined;
-								if (!sink) return { done: true, error: "stream buffer missing", chunks: [] as string[] };
-								return { done: sink.done, error: sink.error, chunks: sink.chunks.slice(from) };
-							},
-							{ key: streamKey, from: lastLen },
-						);
-						for (const chunk of poll.chunks) controller.enqueue(encoder.encode(chunk));
-						lastLen += poll.chunks.reduce((n, c) => n + c.length, 0);
-						done = poll.done;
-						streamError = poll.error;
-						if (!done) await new Promise((r) => setTimeout(r, 100));
+	/** POST the completion from Node (bypasses the page's service worker). */
+	private fetchCompletionFromNode(
+		bodyJson: string,
+		reqHeaders: Record<string, string>,
+		signal?: AbortSignal,
+	): Promise<ReadableStream<Uint8Array>> {
+		return new Promise((resolve, reject) => {
+			const req = https.request(
+				{
+					hostname: "chat.deepseek.com",
+					path: "/api/v0/chat/completion",
+					method: "POST",
+					headers: reqHeaders,
+				},
+				(res) => {
+					if (!res.statusCode || res.statusCode >= 400) {
+						let errText = "";
+						res.on("data", (c) => (errText += c));
+						res.on("end", () => {
+							reject(
+								new Error(
+									`DeepSeek completion failed: ${res.statusCode} ${errText.slice(0, 300)}`,
+								),
+							);
+						});
+						return;
 					}
-					if (streamError) throw new Error(streamError);
-					controller.close();
-				} catch (e) {
-					controller.error(e instanceof Error ? e : new Error(String(e)));
-				} finally {
-					await page.evaluate((key) => {
-						delete (globalThis as Record<string, any>)[key];
-					}, streamKey).catch(() => {});
-				}
-			},
+					// Stream the upstream SSE body directly.
+					resolve(
+						new ReadableStream<Uint8Array>({
+							start(controller) {
+								res.on("data", (chunk: Buffer) => {
+									try {
+										controller.enqueue(new Uint8Array(chunk));
+									} catch {
+										// controller already closed
+									}
+								});
+								res.on("end", () => {
+									try {
+										controller.close();
+									} catch {
+										// ignore
+									}
+								});
+								res.on("error", (e) => {
+									try {
+										controller.error(e);
+									} catch {
+										// ignore
+									}
+								});
+							},
+							cancel() {
+								req.destroy();
+							},
+						}),
+					);
+				},
+			);
+			req.on("error", (e) => reject(new Error(`DeepSeek request error: ${e.message}`)));
+			signal?.addEventListener(
+				"abort",
+				() => req.destroy(new Error("DeepSeek request cancelled")),
+				{ once: true },
+			);
+			req.write(bodyJson);
+			req.end();
 		});
 	}
 

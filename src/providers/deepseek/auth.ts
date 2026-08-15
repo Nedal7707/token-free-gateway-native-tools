@@ -9,6 +9,8 @@ export interface DeepSeekWebCredentials {
 	cookie: string;
 	bearer: string;
 	userAgent: string;
+	/** Session-bound anti-bot header value captured from the web app (x-hif-leim). */
+	hifLeim?: string;
 }
 
 export async function loginDeepseekWeb(params: {
