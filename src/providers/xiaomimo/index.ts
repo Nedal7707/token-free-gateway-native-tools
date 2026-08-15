@@ -6,7 +6,9 @@ import { XiaomiMimoWebClient } from "./client.ts";
 export const definition: ProviderDefinition = {
 	id: "xiaomimo-web",
 	name: "Xiaomi MiMo Web",
-	models: [{ id: "xiaomimo-chat", name: "MiMo Chat" }],
+	models: [
+		{ id: "mimo-v2.5", name: "MiMo V2.5" }
+	],
 	factory: (credentials) => new XiaomiMimoWebClient(credentials as XiaomiMimoWebAuth),
 	loginFn: loginXiaomiMimoWeb,
 };

@@ -22,16 +22,18 @@ export class ChatGPTWebClient extends BaseApiClient<ChatGPTWebAuth> {
 		hostKey: "chatgpt.com",
 		startUrl: "https://chatgpt.com/",
 		cookieDomain: ".chatgpt.com",
-		defaultModel: "gpt-4",
+		defaultModel: "gpt-5.6-luna",
 		models: [
-			{ id: "gpt-5.6-luna", name: "GPT-5.6 Luna" },
-			{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
-			{ id: "gpt-5.6-terra", name: "GPT-5.6 Terra" },
-			{ id: "gpt-5.5", name: "GPT-5.5" },
-			{ id: "gpt-5.4", name: "GPT-5.4" },
-			{ id: "gpt-4-turbo", name: "GPT-4 Turbo" },
-			{ id: "gpt-4", name: "GPT-4" },
-		],
+		{ id: "gpt-5.6-luna", name: "GPT-5.6 Luna" },
+		{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+		{ id: "gpt-5.6-terra", name: "GPT-5.6 Terra" },
+		{ id: "gpt-5.5", name: "GPT-5.5" },
+		{ id: "gpt-5.4", name: "GPT-5.4" },
+		{ id: "gpt-5.3-codex", name: "GPT-5.3 Codex" },
+		{ id: "gpt-5.2", name: "GPT-5.2" },
+		{ id: "gpt-5.1-codex", name: "GPT-5.1 Codex" },
+		{ id: "gpt-5", name: "GPT-5" }
+	],
 	};
 
 	private accessToken: string;
@@ -139,6 +141,11 @@ export class ChatGPTWebClient extends BaseApiClient<ChatGPTWebAuth> {
 		}
 		if (toolChoice) {
 			body.tool_choice = toolChoice;
+		}
+		// Forward the client's reasoning effort to ChatGPT's backend
+		// ("low" | "medium" | "high" | number | boolean).
+		if (params.reasoningEffort !== undefined) {
+			body.reasoning_effort = params.reasoningEffort;
 		}
 		const pageUrl = page.url();
 

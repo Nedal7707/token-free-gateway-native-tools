@@ -22,11 +22,11 @@ export class GrokWebClient extends BaseApiClient<GrokWebAuth> {
 		hostKey: "grok.com",
 		startUrl: "https://grok.com",
 		cookieDomain: ".grok.com",
-		defaultModel: "grok-2",
+		defaultModel: "grok-4.6",
 		models: [
-			{ id: "grok-1", name: "Grok 1 (Web)" },
-			{ id: "grok-2", name: "Grok 2 (Web)" },
-		],
+		{ id: "grok-4.6", name: "Grok 4.6" },
+		{ id: "grok-4.5", name: "Grok 4.5" }
+	],
 	};
 
 	lastConversationId: string | undefined;

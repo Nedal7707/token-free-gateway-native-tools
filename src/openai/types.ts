@@ -9,6 +9,8 @@ export interface ChatCompletionRequest {
 	temperature?: number;
 	max_tokens?: number;
 	user?: string;
+	/** Reasoning effort hint forwarded to providers that support it ("low" | "medium" | "high" | number | boolean). */
+	reasoning_effort?: string | number | boolean;
 }
 
 export type ChatMessage = SystemMessage | UserMessage | AssistantMessage | ToolMessage;

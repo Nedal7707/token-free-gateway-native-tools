@@ -15,12 +15,11 @@ export class KimiWebClient extends BaseApiClient<KimiWebAuth> {
 		hostKey: "kimi.com",
 		startUrl: "https://www.kimi.com/",
 		cookieDomain: ".kimi.com",
-		defaultModel: "moonshot-v1-32k",
+		defaultModel: "kimi-k3",
 		models: [
-			{ id: "moonshot-v1-8k", name: "Moonshot v1 8K" },
-			{ id: "moonshot-v1-32k", name: "Moonshot v1 32K" },
-			{ id: "moonshot-v1-128k", name: "Moonshot v1 128K" },
-		],
+		{ id: "kimi-k3", name: "Kimi K3" },
+		{ id: "kimi-k2.7-code", name: "Kimi K2.7 Code" }
+	],
 	};
 
 	private readonly baseUrl = "https://www.kimi.com";

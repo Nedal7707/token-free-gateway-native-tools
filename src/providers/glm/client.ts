@@ -52,8 +52,14 @@ export class GlmWebClient extends BaseApiClient<GlmWebAuth> {
 		hostKey: "chatglm.cn",
 		startUrl: "https://chatglm.cn",
 		cookieDomain: ".chatglm.cn",
-		defaultModel: "glm-4-plus",
-		models: [{ id: "glm-4-plus", name: "GLM-4 Plus" }],
+		defaultModel: "glm-5.3",
+		models: [
+		{ id: "glm-5.3", name: "GLM-5.3" },
+		{ id: "glm-5.2", name: "GLM-5.2" },
+		{ id: "glm-5.1", name: "GLM-5.1" },
+		{ id: "glm-5", name: "GLM-5" },
+		{ id: "glm-4.7-flash", name: "GLM-4.7 Flash" }
+	],
 	};
 
 	private accessToken: string | null = null;

@@ -15,11 +15,12 @@ export class QwenWebClient extends BaseApiClient<QwenWebAuth> {
 		hostKey: "qwen.ai",
 		startUrl: "https://chat.qwen.ai/",
 		cookieDomain: ".qwen.ai",
-		defaultModel: "qwen3.5-plus",
+		defaultModel: "qwen3.6-plus",
 		models: [
-			{ id: "qwen3.5-plus", name: "Qwen 3.5 Plus" },
-			{ id: "qwen3.5-turbo", name: "Qwen 3.5 Turbo" },
-		],
+		{ id: "qwen3.6-plus", name: "Qwen 3.6 Plus" },
+		{ id: "qwen3.7-max", name: "Qwen 3.7 Max" },
+		{ id: "qwen3.5-plus", name: "Qwen 3.5 Plus" }
+	],
 	};
 
 	private readonly baseUrl = "https://chat.qwen.ai";

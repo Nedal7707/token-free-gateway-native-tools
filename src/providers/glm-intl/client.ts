@@ -15,9 +15,9 @@ export class GlmIntlWebClient extends BaseDomClient<GlmIntlWebAuth> {
 		startUrl: "https://chat.z.ai/",
 		cookieDomain: ".z.ai",
 		models: [
-			{ id: "glm-4-plus", name: "GLM-4 Plus" },
-			{ id: "glm-4-think", name: "GLM-4 Think" },
-		],
+		{ id: "glm-5.2", name: "GLM-5.2" },
+		{ id: "glm-4.7-flash", name: "GLM-4.7 Flash" }
+	],
 		pollIntervalMs: 900,
 		maxWaitMs: 120_000,
 		stabilityThreshold: 3,

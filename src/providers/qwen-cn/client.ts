@@ -22,11 +22,11 @@ export class QwenCNWebClient extends BaseApiClient<QwenCNWebAuth> {
 		hostKey: "qianwen.com",
 		startUrl: "https://www.qianwen.com/",
 		cookieDomain: ".qianwen.com",
-		defaultModel: "Qwen3.5-Plus",
+		defaultModel: "qwen3.6-plus",
 		models: [
-			{ id: "Qwen3.5-Plus", name: "Qwen 3.5 Plus (CN)" },
-			{ id: "Qwen3.5-Turbo", name: "Qwen 3.5 Turbo (CN)" },
-		],
+		{ id: "qwen3.6-plus", name: "Qwen 3.6 Plus (CN)" },
+		{ id: "qwen3.7-max", name: "Qwen 3.7 Max (CN)" }
+	],
 	};
 
 	private readonly baseUrl = "https://chat2.qianwen.com";

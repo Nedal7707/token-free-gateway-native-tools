@@ -115,6 +115,7 @@ async function handleNonStreaming(
 			message: prompt,
 			model,
 			signal: undefined,
+			reasoningEffort: body.reasoning_effort,
 			...(native
 				? {
 						tools: body.tools,
@@ -247,6 +248,7 @@ async function handleStreaming(
 			message: prompt,
 			model,
 			signal: undefined,
+			reasoningEffort: body.reasoning_effort,
 			...(native
 				? {
 						tools: body.tools,

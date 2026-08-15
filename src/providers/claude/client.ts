@@ -25,13 +25,15 @@ export class ClaudeWebClient extends BaseApiClient<ClaudeWebAuth> {
 		hostKey: "claude.ai",
 		startUrl: "https://claude.ai/",
 		cookieDomain: ".claude.ai",
-		defaultModel: "claude-sonnet-4-20250514",
+		defaultModel: "claude-sonnet-4-6",
 		models: [
-			{ id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
-			{ id: "claude-sonnet-4-20250514", name: "Claude Sonnet 4" },
-			{ id: "claude-opus-4-6", name: "Claude Opus 4.6" },
-			{ id: "claude-haiku-4-6", name: "Claude Haiku 4.6" },
-		],
+		{ id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
+		{ id: "claude-opus-4-6", name: "Claude Opus 4.6" },
+		{ id: "claude-haiku-4-6", name: "Claude Haiku 4.6" },
+		{ id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5" },
+		{ id: "claude-opus-4-5", name: "Claude Opus 4.5" },
+		{ id: "claude-haiku-4-5", name: "Claude Haiku 4.5" }
+	],
 	};
 
 	private readonly baseUrl = "https://claude.ai/api";
@@ -147,6 +149,9 @@ export class ClaudeWebClient extends BaseApiClient<ClaudeWebAuth> {
 					tools: toolsArg,
 				};
 				if (toolChoiceArg) body.tool_choice = toolChoiceArg;
+				// NOTE: Anthropic's web completion endpoint does NOT accept a
+				// reasoning/thinking field — adding one makes it return an empty
+				// assistant turn. Reasoning is controlled by the model itself.
 				const completionRes = await fetch(completionUrl, {
 					method: "POST",
 					headers: { "Content-Type": "application/json", Accept: "text/event-stream" },

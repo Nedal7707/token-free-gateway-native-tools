@@ -65,11 +65,11 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 		hostKey: "deepseek.com",
 		startUrl: "https://chat.deepseek.com/",
 		cookieDomain: ".deepseek.com",
-		defaultModel: "deepseek-chat",
+		defaultModel: "deepseek-v4-flash",
 		models: [
-			{ id: "deepseek-chat", name: "DeepSeek Chat" },
-			{ id: "deepseek-reasoner", name: "DeepSeek Reasoner" },
-		],
+		{ id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" },
+		{ id: "deepseek-v4-pro", name: "DeepSeek V4 Pro" }
+	],
 	};
 
 	private chatSessionId = "";

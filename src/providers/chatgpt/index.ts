@@ -12,8 +12,10 @@ export const definition: ProviderDefinition = {
 		{ id: "gpt-5.6-terra", name: "GPT-5.6 Terra" },
 		{ id: "gpt-5.5", name: "GPT-5.5" },
 		{ id: "gpt-5.4", name: "GPT-5.4" },
-		{ id: "gpt-4-turbo", name: "GPT-4 Turbo" },
-		{ id: "gpt-4", name: "GPT-4" },
+		{ id: "gpt-5.3-codex", name: "GPT-5.3 Codex" },
+		{ id: "gpt-5.2", name: "GPT-5.2" },
+		{ id: "gpt-5.1-codex", name: "GPT-5.1 Codex" },
+		{ id: "gpt-5", name: "GPT-5" }
 	],
 	factory: (credentials) => new ChatGPTWebClient(credentials as ChatGPTWebAuth),
 	loginFn: loginChatGPTWeb,

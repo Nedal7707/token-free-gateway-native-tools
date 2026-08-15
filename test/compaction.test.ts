@@ -4,7 +4,9 @@ import { compactMessages, compactRequest, contextWindowFor } from "../src/compac
 describe("compaction (shared module)", () => {
 	test("context window lookup works for gateway models", () => {
 		expect(contextWindowFor("claude-sonnet-4-6")).toBe(200_000);
-		expect(contextWindowFor("gpt-5.6-luna")).toBe(400_000);
+		expect(contextWindowFor("gpt-5.6-luna")).toBe(1_050_000);
+		expect(contextWindowFor("kimi-k3")).toBe(1_048_560);
+		expect(contextWindowFor("glm-5.3")).toBe(1_000_000);
 		expect(contextWindowFor("deepseek-chat")).toBe(128_000);
 		expect(contextWindowFor("unknown-model")).toBe(128_000);
 	});

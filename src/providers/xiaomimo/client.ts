@@ -22,8 +22,10 @@ export class XiaomiMimoWebClient extends BaseApiClient<XiaomiMimoWebAuth> {
 		hostKey: "xiaomimimo.com",
 		startUrl: "https://aistudio.xiaomimimo.com",
 		cookieDomain: ".xiaomimimo.com",
-		defaultModel: "xiaomimo-chat",
-		models: [{ id: "xiaomimo-chat", name: "MiMo Chat" }],
+		defaultModel: "mimo-v2.5",
+		models: [
+		{ id: "mimo-v2.5", name: "MiMo V2.5" }
+	],
 	};
 
 	private serviceToken: string;

@@ -6,8 +6,9 @@ export const definition: ProviderDefinition = {
 	id: "doubao-web",
 	name: "Doubao Web",
 	models: [
-		{ id: "doubao-seed-2.0", name: "Doubao Seed 2.0 (Web)" },
-		{ id: "doubao-pro", name: "Doubao Pro (Web)" },
+		{ id: "doubao-seed-2-0-pro", name: "Doubao Seed 2.0 Pro (Web)" },
+		{ id: "doubao-seed-2-0-lite-260428", name: "Doubao Seed 2.0 Lite (Web)" },
+		{ id: "doubao-seed-2-0-mini-260428", name: "Doubao Seed 2.0 Mini (Web)" },
 	],
 	factory: (credentials) => new DoubaoWebClient(credentials as any),
 	loginFn: loginDoubaoWeb,
