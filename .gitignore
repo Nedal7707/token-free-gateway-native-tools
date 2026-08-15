@@ -42,3 +42,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .vscode
 .cursor
 .cursorrulestsc.log
+
+token-free-gateway.exe
+*.bun-build
