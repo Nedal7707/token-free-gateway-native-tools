@@ -24,9 +24,13 @@ export class ChatGPTWebClient extends BaseApiClient<ChatGPTWebAuth> {
 		cookieDomain: ".chatgpt.com",
 		defaultModel: "gpt-4",
 		models: [
-			{ id: "gpt-4", name: "GPT-4" },
+			{ id: "gpt-5.6-luna", name: "GPT-5.6 Luna" },
+			{ id: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+			{ id: "gpt-5.6-terra", name: "GPT-5.6 Terra" },
+			{ id: "gpt-5.5", name: "GPT-5.5" },
+			{ id: "gpt-5.4", name: "GPT-5.4" },
 			{ id: "gpt-4-turbo", name: "GPT-4 Turbo" },
-			{ id: "gpt-3.5-turbo", name: "GPT-3.5 Turbo" },
+			{ id: "gpt-4", name: "GPT-4" },
 		],
 	};
 
