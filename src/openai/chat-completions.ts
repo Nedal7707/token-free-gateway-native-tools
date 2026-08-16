@@ -101,10 +101,25 @@ function applyReasoningDirective(
 function useNativeTools(client: WebProviderClient, body: ChatCompletionRequest): boolean {
 	if (!body.tools || body.tools.length === 0) return false;
 	if (!client.supportsNativeTools) return false;
-	// Claude Web's native tool path is unverified and hangs (observed 300s
-	// timeout); its DOM/API response is a single prompt string, so injection is
-	// the reliable path. Add providers here as their native path is verified.
-	if (client.providerId === "claude-web" || client.providerId === "chatgpt-web") return false;
+	// Web-session providers (all of them) do NOT accept OpenAI-style tools in
+	// their upstream API — the native path hangs or fails. The reliable path is
+	// prompt injection (tool_json blocks) for every web provider.
+	// Rotator/API providers (opencode-go, nvidia, aihubmix) DO accept native
+	// tools — keep the native path for those.
+	const webProviders = new Set([
+		"claude-web",
+		"chatgpt-web",
+		"deepseek-web",
+		"gemini-web",
+		"glm-web",
+		"glm-intl-web",
+		"kimi-web",
+		"perplexity-web",
+		"qwen-web",
+		"doubao-web",
+		"grok-web",
+	]);
+	if (webProviders.has(client.providerId)) return false;
 	return true;
 }
 
@@ -184,7 +199,31 @@ export async function handleChatCompletions(
 		}, _routeTimeoutMs),
 	);
 
-	return Promise.race([handler, timeout]);
+	const first = await Promise.race([handler, timeout]);
+
+	// TOOL FALLBACK: if the request carried tools and the web provider failed
+	// (error response, or 200 with empty content), retry ONCE as a plain chat
+	// (tools stripped). Web-session models can't always do tool calls; a normal
+	// chat answer is far better than a hard failure.
+	const firstBody = await first.clone().text();
+	const isEmptyOk = first.status === 200 && (!firstBody || firstBody.length < 60);
+	if (hasTools && (first.status >= 400 || isEmptyOk)) {
+		console.log(
+			`[chat-completions] tool request failed (${first.status}), retrying as plain chat for ${model}`,
+		);
+		const noToolsBody: ChatCompletionRequest = { ...body, tools: undefined, tool_choice: undefined };
+		const fallbackPrompt = buildPromptFromMessages(
+			noToolsBody.messages,
+			undefined,
+			undefined,
+		).prompt;
+		const fallback = body.stream
+			? handleStreaming(id, model, fallbackPrompt, false, false, noToolsBody, client)
+			: handleNonStreaming(id, model, fallbackPrompt, false, false, noToolsBody, client);
+		return Promise.race([fallback, timeout]);
+	}
+
+	return first;
 }
 
 async function handleNonStreaming(
