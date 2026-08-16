@@ -201,26 +201,29 @@ export async function handleChatCompletions(
 
 	const first = await Promise.race([handler, timeout]);
 
-	// TOOL FALLBACK: if the request carried tools and the web provider failed
-	// (error response, or 200 with empty content), retry ONCE as a plain chat
-	// (tools stripped). Web-session models can't always do tool calls; a normal
-	// chat answer is far better than a hard failure.
+	// EMPTY/FALLBACK RETRY: if the response is a 200 with empty content (web
+	// models sometimes return an empty turn — kimi thinking-only, deepseek
+	// stale session), retry ONCE so autonomous agents never hit an empty turn
+	// that stops their loop. Tool requests that fail also retry as plain chat
+	// (tools stripped) since web-session models can't always tool-call.
 	const firstBody = await first.clone().text();
 	const isEmptyOk = first.status === 200 && (!firstBody || firstBody.length < 60);
-	if (hasTools && (first.status >= 400 || isEmptyOk)) {
+	if (isEmptyOk || (hasTools && first.status >= 400)) {
 		console.log(
-			`[chat-completions] tool request failed (${first.status}), retrying as plain chat for ${model}`,
+			`[chat-completions] request returned empty/error (${first.status}), retrying once for ${model}`,
 		);
-		const noToolsBody: ChatCompletionRequest = { ...body, tools: undefined, tool_choice: undefined };
-		const fallbackPrompt = buildPromptFromMessages(
-			noToolsBody.messages,
-			undefined,
-			undefined,
+		const retryBody: ChatCompletionRequest = hasTools
+			? { ...body, tools: undefined, tool_choice: undefined }
+			: body;
+		const retryPrompt = buildPromptFromMessages(
+			retryBody.messages,
+			hasTools ? undefined : body.tools,
+			hasTools ? undefined : body.tool_choice,
 		).prompt;
-		const fallback = body.stream
-			? handleStreaming(id, model, fallbackPrompt, false, false, noToolsBody, client)
-			: handleNonStreaming(id, model, fallbackPrompt, false, false, noToolsBody, client);
-		return Promise.race([fallback, timeout]);
+		const retry = body.stream
+			? handleStreaming(id, model, retryPrompt, hasTools, native, retryBody, client)
+			: handleNonStreaming(id, model, retryPrompt, hasTools, native, retryBody, client);
+		return Promise.race([retry, timeout]);
 	}
 
 	return first;
