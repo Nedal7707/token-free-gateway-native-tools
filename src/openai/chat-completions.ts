@@ -39,7 +39,6 @@ function generateId(): string {
  */
 const SUMMARIZER_ROUTES: { base: string; model: string }[] = [
 	{ base: "http://127.0.0.1:10100/v1", model: "cloudflare-workers-ai/@cf/openai/gpt-oss-120b" },
-	{ base: "http://127.0.0.1:3457/v1", model: "deepseek/deepseek-v4-flash" },
 	{ base: "http://127.0.0.1:3460/aihubmix/v1", model: "coding-glm-5.2-free" },
 	{ base: "http://127.0.0.1:3460/zenmux/v1", model: "deepseek/deepseek-v4-flash-free" },
 	{ base: "http://127.0.0.1:3460/nvidia/v1", model: "nvidia/nvidia/nemotron-3-ultra-550b-a55b" },
