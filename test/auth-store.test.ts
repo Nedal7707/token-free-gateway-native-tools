@@ -3,6 +3,8 @@ import { existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	addAccountCredentials,
+	getCredentialPool,
 	getCredentials,
 	getStorePath,
 	loadAuthStore,
@@ -54,5 +56,40 @@ describe("auth-store", () => {
 		saveCredentials("b", { key: "bbb" });
 		expect(getCredentials<{ key: string }>("a")?.key).toBe("aaa");
 		expect(getCredentials<{ key: string }>("b")?.key).toBe("bbb");
+	});
+
+	test("addAccountCredentials appends to a pool", () => {
+		addAccountCredentials("pool-provider", { bearer: "a" });
+		addAccountCredentials("pool-provider", { bearer: "b" });
+		const pool = getCredentialPool("pool-provider");
+		expect(pool).toHaveLength(2);
+		expect(pool[0]).toEqual({ bearer: "a" });
+		expect(pool[1]).toEqual({ bearer: "b" });
+	});
+
+	test("addAccountCredentials deduplicates identical credentials", () => {
+		addAccountCredentials("dedupe-provider", { bearer: "x" });
+		addAccountCredentials("dedupe-provider", { bearer: "x" });
+		expect(getCredentialPool("dedupe-provider")).toHaveLength(1);
+	});
+
+	test("getCredentialPool normalizes single-object shape", () => {
+		saveCredentials("single-provider", { token: "t" });
+		expect(getCredentialPool("single-provider")).toEqual([{ token: "t" }]);
+	});
+
+	test("getCredentialPool supports { accounts: [...] } shape", () => {
+		saveCredentials("accounts-provider", { accounts: [{ bearer: "1" }, { bearer: "2" }] });
+		expect(getCredentialPool("accounts-provider")).toHaveLength(2);
+	});
+
+	test("getCredentialPool returns empty array when absent", () => {
+		expect(getCredentialPool("missing-provider")).toEqual([]);
+	});
+
+	test("addAccountCredentials keeps single shape for one account", () => {
+		addAccountCredentials("one-provider", { bearer: "only" });
+		expect(getCredentials<{ bearer: string }>("one-provider")).toEqual({ bearer: "only" });
+		expect(getCredentialPool("one-provider")).toHaveLength(1);
 	});
 });

@@ -43,6 +43,24 @@ export class ProviderApiError extends Error {
 	}
 }
 
+/**
+ * Raised when a provider rate limit (HTTP 429 or a limit/too-many body) is
+ * detected. The provider client marks the offending account as limited and
+ * rotates to the next account before throwing, so the gateway's retry path
+ * can re-issue the request on a fresh account. When every account is limited
+ * the gateway returns a clear 429 instead of a misleading 502.
+ */
+export class RateLimitError extends Error {
+	constructor(
+		public readonly providerId: string,
+		public readonly httpStatus: number,
+		message: string,
+	) {
+		super(message);
+		this.name = "RateLimitError";
+	}
+}
+
 export interface WebProviderClient {
 	readonly providerId: string;
 	/** Whether this provider supports NATIVE tool calling through its backend API (not prompt-injection). */

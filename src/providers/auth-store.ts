@@ -67,6 +67,55 @@ export function saveCredentials(providerId: string, credentials: unknown): void 
 	saveAuthStore(store);
 }
 
+/**
+ * Append a credential set to a provider's account pool. The first call
+ * behaves like saveCredentials; subsequent calls convert the stored shape
+ * to an array pool (single object → [old, new]) so providers like DeepSeek
+ * can rotate across multiple accounts on rate limits. Duplicate credentials
+ * (same JSON) are skipped.
+ */
+export function addAccountCredentials(providerId: string, credentials: unknown): void {
+	const store = loadAuthStore();
+	const existing = store.profiles[providerId]?.credentials;
+	let pool: unknown[];
+	if (Array.isArray(existing)) {
+		pool = [...existing];
+	} else if (existing !== undefined && existing !== null) {
+		pool = [existing];
+	} else {
+		pool = [];
+	}
+	const key = JSON.stringify(credentials);
+	if (!pool.some((c) => JSON.stringify(c) === key)) {
+		pool.push(credentials);
+	}
+	store.profiles[providerId] = {
+		providerId,
+		credentials: pool.length === 1 ? pool[0] : pool,
+		updatedAt: new Date().toISOString(),
+	};
+	saveAuthStore(store);
+}
+
+/**
+ * Normalize a provider's stored credentials into an account pool (array).
+ * Supports the legacy single-object shape, an array pool, and the
+ * `{ accounts: [...] }` shape. Returns an empty array when absent.
+ */
+export function getCredentialPool(providerId: string): unknown[] {
+	const creds = getCredentials(providerId);
+	if (creds === null || creds === undefined) return [];
+	if (Array.isArray(creds)) return creds;
+	if (
+		typeof creds === "object" &&
+		Array.isArray((creds as { accounts?: unknown[] }).accounts) &&
+		((creds as { accounts?: unknown[] }).accounts?.length ?? 0) > 0
+	) {
+		return (creds as { accounts: unknown[] }).accounts;
+	}
+	return [creds];
+}
+
 export function listAuthorizedProviders(): string[] {
 	const store = loadAuthStore();
 	return Object.keys(store.profiles);

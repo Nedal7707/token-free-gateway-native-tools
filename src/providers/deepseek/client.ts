@@ -8,8 +8,25 @@ import { parseCookieHeader } from "../shared/cookie-parser.ts";
 import { throwIfSessionExpired } from "../shared/error-guard.ts";
 import type { EvalResult } from "../shared/eval-helpers.ts";
 import type { StreamResult } from "../types.ts";
+import { RateLimitError } from "../types.ts";
 import type { DeepSeekWebCredentials } from "./auth.ts";
 import { parseDeepSeekStream } from "./stream.ts";
+import { isRateLimitError, pickNextAccount } from "./rotation.ts";
+
+/**
+ * Normalize stored credentials into an account pool (array).
+ * Supports: single object, array of objects, or `{ accounts: [...] }`.
+ */
+function normalizeCredentialPool(
+	auth: DeepSeekWebCredentials | DeepSeekWebCredentials[] | { accounts?: DeepSeekWebCredentials[] },
+): DeepSeekWebCredentials[] {
+	if (Array.isArray(auth)) return auth.filter(Boolean) as DeepSeekWebCredentials[];
+	if (auth && typeof auth === "object" && Array.isArray((auth as { accounts?: unknown[] }).accounts)) {
+		const accounts = (auth as { accounts: DeepSeekWebCredentials[] }).accounts;
+		return accounts.filter(Boolean);
+	}
+	return [auth as DeepSeekWebCredentials];
+}
 
 export interface DeepSeekPowChallenge {
 	algorithm: string;
@@ -78,6 +95,43 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 	private parentMessageId: string | number | null = null;
 	private wasmModule: WebAssembly.Instance | null = null;
 
+	/** Account pool for multi-account rotation (single account = length 1). */
+	private readonly accountPool: DeepSeekWebCredentials[];
+	private activeIndex = 0;
+	private readonly limitedAccounts = new Set<number>();
+
+	constructor(
+		auth: DeepSeekWebCredentials | DeepSeekWebCredentials[] | { accounts?: DeepSeekWebCredentials[] },
+	) {
+		const pool = normalizeCredentialPool(auth);
+		if (pool.length === 0) throw new Error("DeepSeekWebClient requires at least one credential set");
+		super(pool[0]!);
+		this.accountPool = pool;
+	}
+
+	/**
+	 * Mark the active account as rate-limited and rotate to the next
+	 * available account (round-robin). Returns the new index, or -1 when
+	 * every account is limited.
+	 */
+	private markCurrentLimitedAndRotate(): number {
+		this.limitedAccounts.add(this.activeIndex);
+		const next = pickNextAccount(this.accountPool.length, this.limitedAccounts, this.activeIndex);
+		if (next === -1) {
+			console.error(`[DeepSeekWebClient] all ${this.accountPool.length} accounts rate-limited`);
+			return -1;
+		}
+		this.activeIndex = next;
+		// this.auth is protected readonly in the base; rotate through a cast.
+		(this as unknown as { auth: DeepSeekWebCredentials }).auth = this.accountPool[next]!;
+		this.chatSessionId = "";
+		this.parentMessageId = null;
+		console.warn(
+			`[DeepSeekWebClient] rotated to account ${next + 1}/${this.accountPool.length} after rate limit`,
+		);
+		return next;
+	}
+
 	protected getCookies() {
 		return parseCookieHeader(this.auth.cookie || "", this.config.cookieDomain);
 	}
@@ -131,38 +185,74 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 		reasoningEffort?: string | number | boolean;
 		stream?: boolean;
 	}): Promise<ReadableStream<Uint8Array>> {
-		const page = await this.getPage();
-		// Auto-refresh: deepseek rotates its session token periodically. Before
-		// each request, re-read the CURRENT token + hif-leim + cookies from the
-		// live page (the web app always has the valid session) so we never send
-		// a stale bearer.
-		await this.refreshSessionFromPage(page);
-		// FRESH SESSION PER REQUEST (fix 2026-08-16): the gateway's flattened
-		// prompt is SELF-CONTAINED — it already contains the entire conversation
-		// (system + all turns + tools + agentic directive). Reusing one
-		// chat_session_id with parent_message_id chaining made the deepseek
-		// server-side session accumulate a FULL COPY of the conversation on
-		// every turn (turn 2 = 2x, turn 3 = 3x ...), blowing the real context
-		// window after 2-3 turns so the model stopped/emptied. It also leaked
-		// context across OpenCode sessions (the client is a singleton). A fresh
-		// session per request is stateless and correct: the server holds exactly
-		// the one self-contained prompt.
-		const session = await this.createChatSession();
-		this.chatSessionId = session.chat_session_id || "";
-		this.parentMessageId = null;
-		const body = await this.chatCompletions({
-			sessionId: this.chatSessionId,
-			parentMessageId: this.parentMessageId,
-			message: params.message,
-			model: params.model,
-			signal: params.signal,
-			tools: params.tools,
-			toolChoice: params.toolChoice,
-			stream: params.stream,
-			reasoningEffort: params.reasoningEffort,
-		});
-		if (!body) throw new Error("DeepSeek Web API returned empty response body");
-		return body;
+		return this.sendMessageWithRotation(params, 0);
+	}
+
+	private async sendMessageWithRotation(
+		params: {
+			message: string;
+			model?: string;
+			signal?: AbortSignal;
+			tools?: unknown[];
+			toolChoice?: unknown;
+			messages?: unknown[];
+			reasoningEffort?: string | number | boolean;
+			stream?: boolean;
+		},
+		attempt: number,
+	): Promise<ReadableStream<Uint8Array>> {
+		try {
+			const page = await this.getPage();
+			// Auto-refresh: deepseek rotates its session token periodically. Before
+			// each request, re-read the CURRENT token + hif-leim + cookies from the
+			// live page (the web app always has the valid session) so we never send
+			// a stale bearer. Only the PRIMARY account (index 0) matches the live
+			// Chrome page; rotated accounts use their stored credentials only.
+			if (this.activeIndex === 0) await this.refreshSessionFromPage(page);
+			// FRESH SESSION PER REQUEST (fix 2026-08-16): the gateway's flattened
+			// prompt is SELF-CONTAINED — it already contains the entire conversation
+			// (system + all turns + tools + agentic directive). Reusing one
+			// chat_session_id with parent_message_id chaining made the deepseek
+			// server-side session accumulate a FULL COPY of the conversation on
+			// every turn (turn 2 = 2x, turn 3 = 3x ...), blowing the real context
+			// window after 2-3 turns so the model stopped/emptied. It also leaked
+			// context across OpenCode sessions (the client is a singleton). A fresh
+			// session per request is stateless and correct: the server holds exactly
+			// the one self-contained prompt.
+			const session = await this.createChatSession();
+			this.chatSessionId = session.chat_session_id || "";
+			this.parentMessageId = null;
+			const body = await this.chatCompletions({
+				sessionId: this.chatSessionId,
+				parentMessageId: this.parentMessageId,
+				message: params.message,
+				model: params.model,
+				signal: params.signal,
+				tools: params.tools,
+				toolChoice: params.toolChoice,
+				stream: params.stream,
+				reasoningEffort: params.reasoningEffort,
+			});
+			if (!body) throw new Error("DeepSeek Web API returned empty response body");
+			return body;
+		} catch (err) {
+			// A rate limit already rotated the account inside
+			// fetchCompletionFromNode; retry ONCE on the fresh account. When
+			// every account is limited the RateLimitError propagates to the
+			// gateway, which returns a clear 429.
+			if (
+				err instanceof RateLimitError &&
+				attempt < 1 &&
+				this.accountPool.length > 1 &&
+				this.limitedAccounts.size < this.accountPool.length
+			) {
+				console.warn(
+					`[DeepSeekWebClient] retrying on rotated account ${this.activeIndex + 1} (attempt ${attempt + 2})`,
+				);
+				return this.sendMessageWithRotation(params, attempt + 1);
+			}
+			throw err;
+		}
 	}
 
 	/**
@@ -264,11 +354,16 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 			// Empty completion with a valid request usually means the chat
 			// session went stale server-side. Invalidate it so the next request
 			// creates a fresh session (autonomous agents working for hours hit
-			// this regularly).
+			// this regularly). With multiple accounts, also rotate to the next
+			// account — an empty turn is a common rate-limit symptom (the
+			// gateway's retry then lands on a fresh account).
 			if (!result.text?.trim() && !result.toolCalls?.length && !result.thinkingText?.trim()) {
 				console.warn("[DeepSeekWebClient] empty completion — invalidating chat session");
 				this.chatSessionId = "";
 				this.parentMessageId = null;
+				if (this.accountPool.length > 1) {
+					this.markCurrentLimitedAndRotate();
+				}
 			}
 			return result;
 		});
@@ -502,11 +597,26 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 						let errText = "";
 						res.on("data", (c) => (errText += c));
 						res.on("end", () => {
-							reject(
-								new Error(
-									`DeepSeek completion failed: ${res.statusCode} ${errText.slice(0, 300)}`,
-								),
-							);
+							const body = errText.slice(0, 300);
+							const status = res.statusCode ?? 0;
+							// Rate limit: mark the active account limited, rotate
+							// to the next account, and raise a typed error so the
+							// gateway can retry on the fresh account (or return a
+							// clear 429 when every account is limited).
+							if (isRateLimitError(status, errText)) {
+								const rotated = this.markCurrentLimitedAndRotate();
+								reject(
+									new RateLimitError(
+										this.providerId,
+										status,
+										rotated === -1
+											? `DeepSeek rate limited: all ${this.accountPool.length} accounts limited (${status} ${body})`
+											: `DeepSeek rate limited on account ${this.activeIndex + 1}; rotated to account ${rotated + 1} (${status} ${body})`,
+									),
+								);
+								return;
+							}
+							reject(new Error(`DeepSeek completion failed: ${status} ${body}`));
 						});
 						return;
 					}

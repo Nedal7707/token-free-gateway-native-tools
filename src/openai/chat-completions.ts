@@ -1,6 +1,6 @@
 import { evictProviderClient } from "../providers/registry.ts";
 import type { WebProviderClient } from "../providers/types.ts";
-import { ProviderApiError, SessionExpiredError } from "../providers/types.ts";
+import { ProviderApiError, RateLimitError, SessionExpiredError } from "../providers/types.ts";
 import { compactMessages, sanitizeMaxTokens } from "../compaction.ts";
 import { buildPromptFromMessages, parseToolResponse } from "../tool-calling/converter.ts";
 import {
@@ -353,7 +353,17 @@ export async function handleChatCompletions(
 		first.status === 200 && body.stream && firstBody.length > 0 && !streamHasPayload;
 	const isStreamError =
 		first.status === 200 && body.stream && firstBody.includes('"server_error"');
-	if (isEmptyOk || isEmptyStreamTurn || isStreamError || (hasTools && first.status >= 400)) {
+	// Rate limit (429): the deepseek client already rotated to a fresh account
+	// before throwing, so retry ONCE on the new account. If every account is
+	// limited the retry returns 429 again and the client sees a clear error.
+	const isRateLimited = first.status === 429;
+	if (
+		isEmptyOk ||
+		isEmptyStreamTurn ||
+		isStreamError ||
+		isRateLimited ||
+		(hasTools && first.status >= 400)
+	) {
 		console.log(
 			`[chat-completions] request returned empty/error (${first.status}, stream=${body.stream}, emptyTurn=${isEmptyStreamTurn}), retrying once for ${model}`,
 		);
@@ -700,6 +710,11 @@ function providerErrorResponse(err: unknown, context: string): Response {
 		const message = err.message;
 		console.error(`[chat-completions] ${context}: provider error ${err.httpStatus}: ${message}`);
 		return jsonError(message, err.httpStatus);
+	}
+	if (err instanceof RateLimitError) {
+		const message = err.message;
+		console.error(`[chat-completions] ${context}: rate limited (${err.httpStatus}): ${message}`);
+		return jsonError(message, 429);
 	}
 	const message = err instanceof Error ? err.message : String(err);
 	console.error(`[chat-completions] ${context}: ${message}`);

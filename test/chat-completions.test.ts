@@ -166,3 +166,72 @@ describe("chat completions response format", () => {
 		expect(json.choices[0]?.message.tool_calls).toBeUndefined();
 	});
 });
+
+describe("rate-limit retry", () => {
+	test("429 response triggers one retry and succeeds on the rotated account", async () => {
+		const { handleChatCompletions } = await import("../src/openai/chat-completions.ts");
+		const { RateLimitError } = await import("../src/providers/types.ts");
+
+		let calls = 0;
+		const mockClient = {
+			providerId: "deepseek-web",
+			init: async () => {},
+			sendMessage: async () => {
+				calls++;
+				if (calls === 1) {
+					throw new RateLimitError("deepseek-web", 429, "DeepSeek rate limited; rotated to account 2");
+				}
+				const encoder = new TextEncoder();
+				const sseData = JSON.stringify({
+					type: "content_block_delta",
+					delta: { text: "Recovered on account 2" },
+				});
+				return new ReadableStream({
+					start(controller) {
+						controller.enqueue(encoder.encode(`data: ${sseData}\n\n`));
+						controller.close();
+					},
+				});
+			},
+			parseStream: async (body: ReadableStream<Uint8Array>, onDelta?: (d: string) => void) =>
+				parseClaudeStream(body, onDelta),
+			listModels: () => [{ id: "deepseek-v4-pro", name: "DeepSeek V4 Pro" }],
+		};
+
+		const body: ChatCompletionRequest = {
+			model: "deepseek-v4-pro",
+			messages: [{ role: "user", content: "Continue" }],
+		};
+
+		const res = await handleChatCompletions(body, mockClient as any);
+		expect(calls).toBe(2); // first 429, then retry
+		expect(res.status).toBe(200);
+		const json = (await res.json()) as ChatCompletionResponse;
+		expect(json.choices[0]?.message.content).toContain("Recovered on account 2");
+	});
+
+	test("RateLimitError when all accounts limited returns 429", async () => {
+		const { handleChatCompletions } = await import("../src/openai/chat-completions.ts");
+		const { RateLimitError } = await import("../src/providers/types.ts");
+
+		const mockClient = {
+			providerId: "deepseek-web",
+			init: async () => {},
+			sendMessage: async () => {
+				throw new RateLimitError("deepseek-web", 429, "DeepSeek rate limited: all 3 accounts limited");
+			},
+			parseStream: async () => ({ text: "", thinkingText: "" }),
+			listModels: () => [{ id: "deepseek-v4-pro", name: "DeepSeek V4 Pro" }],
+		};
+
+		const body: ChatCompletionRequest = {
+			model: "deepseek-v4-pro",
+			messages: [{ role: "user", content: "Continue" }],
+		};
+
+		const res = await handleChatCompletions(body, mockClient as any);
+		expect(res.status).toBe(429);
+		const json = (await res.json()) as { error: { message: string } };
+		expect(json.error.message).toContain("all 3 accounts limited");
+	});
+});

@@ -8,7 +8,7 @@
 
 import { createInterface } from "node:readline";
 import { loadConfig } from "../config.ts";
-import { listAuthorizedProviders, saveCredentials } from "../providers/auth-store.ts";
+import { addAccountCredentials, listAuthorizedProviders, saveCredentials } from "../providers/auth-store.ts";
 import { listProviderDefinitions } from "../providers/registry.ts";
 
 function question(rl: ReturnType<typeof createInterface>, prompt: string): Promise<string> {
@@ -103,8 +103,16 @@ async function main() {
 			});
 
 			if (credentials && typeof credentials === "object") {
-				saveCredentials(provider.id, credentials);
-				console.log(`  ✓ ${provider.name} authorization succeeded!`);
+				// DeepSeek supports multiple accounts: each authorization APPENDS
+				// to the credential pool so the client can rotate on rate limits.
+				// Other providers keep the single-credential overwrite behavior.
+				if (provider.id === "deepseek-web") {
+					addAccountCredentials(provider.id, credentials);
+					console.log(`  ✓ ${provider.name} account added to rotation pool!`);
+				} else {
+					saveCredentials(provider.id, credentials);
+					console.log(`  ✓ ${provider.name} authorization succeeded!`);
+				}
 			}
 		} catch (error) {
 			console.error(
