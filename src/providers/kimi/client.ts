@@ -60,45 +60,55 @@ export class KimiWebClient extends BaseApiClient<KimiWebAuth> {
 		const kimiAuthCookie = cookies.find((c) => c.name === "kimi-auth")?.value;
 		let authToken = this.auth.accessToken || kimiAuthCookie;
 
-		// Auto-refresh: kimi access tokens are short-lived (~15 min). First try
-		// the refresh_token API; if that fails, read the CURRENT token from the
-		// page's localStorage (the web app always holds the valid session), and
-		// as a last resort reload the page so the app mints a fresh token.
+		// Auto-refresh: kimi access tokens are short-lived (~15 min).
+		// 1. Refresh via the refresh_token API when available.
+		// 2. Read the CURRENT token from the page's localStorage (the web app
+		//    holds the valid session).
+		// 3. If the page token is expired too, RELOAD the page so the app mints
+		//    a fresh one (verified: reload produces a new exp).
 		if (!authToken || this.isKimiTokenExpired(authToken)) {
 			const refreshed = await this.refreshKimiToken(page);
-			if (refreshed) {
+			if (refreshed && !this.isKimiTokenExpired(refreshed)) {
 				authToken = refreshed;
+				(this.auth as { accessToken?: string }).accessToken = refreshed;
+				console.log("[KimiWebClient] token refreshed via refresh API");
 			} else {
 				const pageToken = await this.readTokenFromPage(page);
-				if (pageToken) {
+				if (pageToken && !this.isKimiTokenExpired(pageToken)) {
 					authToken = pageToken;
 					(this.auth as { accessToken?: string }).accessToken = pageToken;
-				}
-				if (!authToken || this.isKimiTokenExpired(authToken)) {
-					// Reload the page: the app re-initializes and mints a fresh
-					// token on load when the old one is expired.
+					console.log("[KimiWebClient] token read from page");
+				} else {
+					// Reload the page so the app mints a fresh token.
 					try {
+						console.log("[KimiWebClient] token expired, reloading page for fresh token...");
 						await page.goto(this.baseUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
-						await new Promise((r) => setTimeout(r, 4000));
-						const fresh = await this.readTokenFromPage(page);
-						if (fresh && !this.isKimiTokenExpired(fresh)) {
-							authToken = fresh;
-							(this.auth as { accessToken?: string }).accessToken = fresh;
-							console.log("[KimiWebClient] token refreshed via page reload");
+						// Wait for the app to initialize and write the token.
+						for (let i = 0; i < 10; i++) {
+							await new Promise((r) => setTimeout(r, 1500));
+							const fresh = await this.readTokenFromPage(page);
+							if (fresh && !this.isKimiTokenExpired(fresh)) {
+								authToken = fresh;
+								(this.auth as { accessToken?: string }).accessToken = fresh;
+								console.log("[KimiWebClient] token refreshed via page reload");
+								break;
+							}
 						}
-					} catch {
-						// ignore reload errors
+					} catch (err) {
+						console.warn(
+							`[KimiWebClient] reload failed: ${err instanceof Error ? err.message : String(err)}`,
+						);
 					}
 				}
 			}
 		}
 
-		if (!authToken) {
+		if (!authToken || this.isKimiTokenExpired(authToken)) {
 			return {
 				ok: false,
 				status: 401,
 				error:
-					"Kimi: no credentials (accessToken or kimi-auth cookie). Run webauth to refresh login.",
+					"Kimi: no valid credentials (accessToken expired and refresh failed). Run webauth to refresh login.",
 			};
 		}
 
