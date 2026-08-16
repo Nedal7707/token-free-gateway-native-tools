@@ -12,7 +12,10 @@ function parseSseData(dataStr: string): Record<string, unknown> | null {
 
 function splitRedactedThinking(full: string): { text: string; thinkingText: string } {
 	let thinkingText = "";
-	const re = /<redacted_thinking>([\s\S]*?)<\/redacted_thinking>/gi;
+	// Extract both the native redacted_thinking blocks and the <thinking> tags
+	// the models emit when thinking is enabled, so reasoning is surfaced as
+	// reasoning_content instead of being left in the visible content.
+	const re = /<(?:redacted_thinking|thinking)>([\s\S]*?)<\/(?:redacted_thinking|thinking)>/gi;
 	for (let m = re.exec(full); m !== null; m = re.exec(full)) {
 		thinkingText += (thinkingText ? "\n" : "") + (m[1]?.trim() ?? "");
 	}

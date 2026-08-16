@@ -206,14 +206,27 @@ export class KimiWebClient extends BaseApiClient<KimiWebAuth> {
 		try {
 			const result = await page.evaluate(
 				async ({ rt }: { rt: string }) => {
-					const res = await fetch("https://www.kimi.com/api/auth/token/refresh", {
-						method: "POST",
-						headers: { "Content-Type": "application/json" },
-						body: JSON.stringify({ refresh_token: rt }),
-					});
+					const res = await fetch(
+						"https://auth.kimi.com/api/account.gateway.v1.AuthService/RefreshToken",
+						{
+							method: "POST",
+							headers: { "Content-Type": "application/json" },
+							body: JSON.stringify({ refresh_token: rt }),
+						},
+					);
 					if (!res.ok) return null;
-					const data = (await res.json()) as { access_token?: string };
-					return data.access_token ?? null;
+					const data = (await res.json()) as {
+						data?: { access_token?: string; accessToken?: string };
+						access_token?: string;
+						accessToken?: string;
+					};
+					const token =
+						data.data?.access_token ??
+						data.data?.accessToken ??
+						data.access_token ??
+						data.accessToken ??
+						null;
+					return token;
 				},
 				{ rt: refreshToken },
 			);
