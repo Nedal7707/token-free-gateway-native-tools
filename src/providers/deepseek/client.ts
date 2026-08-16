@@ -137,12 +137,19 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 		// live page (the web app always has the valid session) so we never send
 		// a stale bearer.
 		await this.refreshSessionFromPage(page);
-		if (!this.chatSessionId) {
-			const session = await this.createChatSession();
-			this.chatSessionId = session.chat_session_id || "";
-			// Fresh session: parent_message_id stays null (matches the web UI
-			// for a brand-new conversation).
-		}
+		// FRESH SESSION PER REQUEST (fix 2026-08-16): the gateway's flattened
+		// prompt is SELF-CONTAINED — it already contains the entire conversation
+		// (system + all turns + tools + agentic directive). Reusing one
+		// chat_session_id with parent_message_id chaining made the deepseek
+		// server-side session accumulate a FULL COPY of the conversation on
+		// every turn (turn 2 = 2x, turn 3 = 3x ...), blowing the real context
+		// window after 2-3 turns so the model stopped/emptied. It also leaked
+		// context across OpenCode sessions (the client is a singleton). A fresh
+		// session per request is stateless and correct: the server holds exactly
+		// the one self-contained prompt.
+		const session = await this.createChatSession();
+		this.chatSessionId = session.chat_session_id || "";
+		this.parentMessageId = null;
 		const body = await this.chatCompletions({
 			sessionId: this.chatSessionId,
 			parentMessageId: this.parentMessageId,
