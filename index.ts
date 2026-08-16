@@ -26,7 +26,7 @@ Options:
   --version, -v       Show version
 
 Environment (override config file):
-  TFG_PORT            Server port (default: 3456)
+  TFG_PORT            Server port (default: 3461)
   TFG_API_KEY         Bearer token for client auth (optional, empty = disabled)
   TFG_CDP_URL         Chrome debug port URL (default: http://127.0.0.1:9222)
 

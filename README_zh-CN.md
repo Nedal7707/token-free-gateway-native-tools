@@ -227,7 +227,7 @@ TFG_* 环境变量          ← 最高优先级
 
 | 环境变量                  | 默认值                  | 说明                                          |
 | ------------------------- | ----------------------- | --------------------------------------------- |
-| `TFG_PORT`                | `3456`                  | 监听端口                                      |
+| `TFG_PORT`                | `3461`                  | 监听端口                                      |
 | `TFG_API_KEY`             | `""`（禁用）            | 客户端鉴权 Bearer Token；为空则关闭鉴权       |
 | `TFG_CDP_URL`             | `http://127.0.0.1:9222` | Chrome 远程调试协议地址                       |
 | `TFG_REQUEST_TIMEOUT_SEC` | `300`                   | `/v1/chat/completions` 单次请求超时时间（秒） |
@@ -235,7 +235,7 @@ TFG_* 环境变量          ← 最高优先级
 也可以在二进制同目录放一个 `.env` 文件，Bun 会自动加载：
 
 ```bash
-TFG_PORT=3456
+TFG_PORT=3461
 TFG_API_KEY=my-secret-key
 TFG_CDP_URL=http://127.0.0.1:9222
 TFG_REQUEST_TIMEOUT_SEC=300

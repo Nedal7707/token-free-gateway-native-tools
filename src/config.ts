@@ -18,7 +18,10 @@ interface ConfigFile {
 }
 
 const DEFAULTS: Required<ConfigFile> = {
-	port: 3456,
+	// NOTE: the running gateway listens on 3461 (set in ~/.token-free-gateway/
+	// config.json). 3456 was the original default; keep 3461 here so agents and
+	// docs reference the ACTUAL port.
+	port: 3461,
 	apiKey: "",
 	cdpUrl: "http://127.0.0.1:9222",
 	requestTimeoutSec: 300,

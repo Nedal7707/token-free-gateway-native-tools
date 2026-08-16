@@ -227,7 +227,7 @@ All variables use the `TFG_` prefix to avoid conflicts with other software.
 
 | Variable                  | Default                 | Description                                              |
 | ------------------------- | ----------------------- | -------------------------------------------------------- |
-| `TFG_PORT`                | `3456`                  | Server listen port                                       |
+| `TFG_PORT`                | `3461`                  | Server listen port                                       |
 | `TFG_API_KEY`             | `""` (disabled)         | Bearer token for client auth; empty = no auth            |
 | `TFG_CDP_URL`             | `http://127.0.0.1:9222` | Chrome DevTools Protocol endpoint                        |
 | `TFG_REQUEST_TIMEOUT_SEC` | `300`                   | Per-request timeout (seconds) for `/v1/chat/completions` |
@@ -235,7 +235,7 @@ All variables use the `TFG_` prefix to avoid conflicts with other software.
 You can also put them in a `.env` file next to the binary — Bun loads it automatically:
 
 ```bash
-TFG_PORT=3456
+TFG_PORT=3461
 TFG_API_KEY=my-secret-key
 TFG_CDP_URL=http://127.0.0.1:9222
 TFG_REQUEST_TIMEOUT_SEC=300

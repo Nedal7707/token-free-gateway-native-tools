@@ -253,6 +253,17 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 	): Promise<StreamResult> {
 		return parseDeepSeekStream(body, onDelta, (id) => {
 			this.parentMessageId = id;
+		}).then((result) => {
+			// Empty completion with a valid request usually means the chat
+			// session went stale server-side. Invalidate it so the next request
+			// creates a fresh session (autonomous agents working for hours hit
+			// this regularly).
+			if (!result.text?.trim() && !result.toolCalls?.length && !result.thinkingText?.trim()) {
+				console.warn("[DeepSeekWebClient] empty completion — invalidating chat session");
+				this.chatSessionId = "";
+				this.parentMessageId = null;
+			}
+			return result;
 		});
 	}
 
