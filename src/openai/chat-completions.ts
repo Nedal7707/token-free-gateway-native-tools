@@ -38,12 +38,14 @@ function generateId(): string {
  * extractive note already in the prompt).
  */
 const SUMMARIZER_ROUTES: { base: string; model: string }[] = [
+	// Token-Free Gateway FIRST (owner decision 2026-08-16): frontier free
+	// models with the multi-account rotation pool are the preferred summarizer.
+	{ base: "http://127.0.0.1:3461/v1", model: "deepseek-v4-flash" },
 	{ base: "http://127.0.0.1:10100/v1", model: "cloudflare-workers-ai/@cf/openai/gpt-oss-120b" },
-	{ base: "http://127.0.0.1:3460/aihubmix/v1", model: "coding-glm-5.2-free" },
 	{ base: "http://127.0.0.1:3460/zenmux/v1", model: "deepseek/deepseek-v4-flash-free" },
 	{ base: "http://127.0.0.1:3460/nvidia/v1", model: "nvidia/nvidia/nemotron-3-ultra-550b-a55b" },
 	{ base: "http://127.0.0.1:3460/opencode/v1", model: "deepseek-v4-flash" },
-	{ base: "http://127.0.0.1:3461/v1", model: "deepseek-v4-flash" },
+	{ base: "http://127.0.0.1:3460/aihubmix/v1", model: "coding-glm-5.2-free" },
 ];
 
 let cachedSummarizerRoute: { base: string; model: string } | null = null;
