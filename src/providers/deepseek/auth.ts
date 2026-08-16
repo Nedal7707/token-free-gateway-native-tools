@@ -76,9 +76,13 @@ export async function captureDeepseekSessionFromPage(
 			if (key.toLowerCase().includes("token") || key.toLowerCase().includes("auth")) {
 				try {
 					const parsed: unknown = JSON.parse(value);
-					if (typeof parsed === "object" && parsed !== null && "token" in parsed) {
-						const token = (parsed as { token?: string }).token;
-						if (token) bearer = token;
+					if (typeof parsed === "object" && parsed !== null) {
+						// DeepSeek stores the session token in userToken as
+						// {"value":"...","__version":"0"} — also accept a
+						// {"token":"..."} shape and a bare string.
+						const obj = parsed as { value?: string; token?: string };
+						const token = obj.value ?? obj.token;
+						if (typeof token === "string" && token.length > 20) bearer = token;
 					} else if (typeof parsed === "string" && parsed.length > 20) {
 						bearer = parsed;
 					}
