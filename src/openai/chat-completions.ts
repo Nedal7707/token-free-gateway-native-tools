@@ -485,6 +485,13 @@ async function streamWithTools(
 	} else {
 		if (content) {
 			w.writeChunk(id, model, [{ index: 0, delta: { content }, finish_reason: null }]);
+		} else if (result.thinkingText) {
+			// Thinking-only response (no final content): surface the thinking as
+			// the visible content so OpenCode shows a real assistant turn instead
+			// of an empty message titled "<thinking>".
+			w.writeChunk(id, model, [
+				{ index: 0, delta: { content: `💭 Thinking:\n${result.thinkingText}` }, finish_reason: null },
+			]);
 		}
 		if (result.thinkingText) {
 			w.writeChunk(id, model, [
