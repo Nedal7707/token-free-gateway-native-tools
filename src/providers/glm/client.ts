@@ -142,8 +142,11 @@ export class GlmWebClient extends BaseApiClient<GlmWebAuth> {
 		if (!this.accessToken) await this.refreshAccessToken();
 		const assistantId = ASSISTANT_ID_MAP[params.model] ?? DEFAULT_ASSISTANT_ID;
 		const fetchTimeoutMs = 120_000;
-		const sign = generateSign();
 		const requestId = crypto.randomUUID().replace(/-/g, "");
+		// Match the web UI's exact request shape (captured from the live app):
+		// chat_mode "thinking" enables real reasoning, is_networking true matches
+		// the UI, and the stream URL carries the refer__991 param.
+		const reasoningOn = params.reasoningEffort !== undefined && params.reasoningEffort !== false;
 		const body = {
 			assistant_id: assistantId,
 			conversation_id: "",
@@ -155,15 +158,15 @@ export class GlmWebClient extends BaseApiClient<GlmWebAuth> {
 				input_question_type: "xxxx",
 				channel: "",
 				draft_id: "",
-				chat_mode: "zero",
-				is_networking: false,
+				chat_mode: reasoningOn ? "thinking" : "zero",
+				is_networking: true,
 				quote_log_id: "",
 				platform: "pc",
 			},
 			messages: [{ role: "user", content: [{ type: "text", text: params.message }] }],
 		};
 		const evalPromise = page.evaluate(
-			async ({ accessToken, bodyStr, deviceId, requestId, timeoutMs, sign, xExpGroups }) => {
+			async ({ accessToken, bodyStr, deviceId, requestId, timeoutMs }) => {
 				let timer: ReturnType<typeof setTimeout> | undefined;
 				try {
 					const controller = new AbortController();
@@ -174,26 +177,20 @@ export class GlmWebClient extends BaseApiClient<GlmWebAuth> {
 						"App-Name": "chatglm",
 						Origin: "https://chatglm.cn",
 						"X-App-Platform": "pc",
-						"X-App-Version": "0.0.1",
-						"X-App-fr": "default",
-						"X-Device-Brand": "",
 						"X-Device-Id": deviceId,
-						"X-Device-Model": "",
-						"X-Exp-Groups": xExpGroups,
-						"X-Lang": "zh",
-						"X-Nonce": sign.nonce,
 						"X-Request-Id": requestId,
-						"X-Sign": sign.sign,
-						"X-Timestamp": sign.timestamp,
 					};
 					if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
-					const res = await fetch("https://chatglm.cn/chatglm/backend-api/assistant/stream", {
-						method: "POST",
-						headers,
-						credentials: "include",
-						body: bodyStr,
-						signal: controller.signal,
-					});
+					const res = await fetch(
+						`https://chatglm.cn/chatglm/backend-api/assistant/stream?refer__991=${Date.now()}`,
+						{
+							method: "POST",
+							headers,
+							credentials: "include",
+							body: bodyStr,
+							signal: controller.signal,
+						},
+					);
 					clearTimeout(timer);
 					if (!res.ok) {
 						const errorText = await res.text();
@@ -227,8 +224,6 @@ export class GlmWebClient extends BaseApiClient<GlmWebAuth> {
 				deviceId: this.deviceId,
 				requestId,
 				timeoutMs: fetchTimeoutMs,
-				sign,
-				xExpGroups: X_EXP_GROUPS,
 			},
 		);
 		const responseData = await withEvalTimeout(evalPromise, fetchTimeoutMs + 10_000, "GLM");
