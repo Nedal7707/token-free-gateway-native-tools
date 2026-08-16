@@ -240,6 +240,16 @@ async function handleNonStreaming(
 		const promptTokens = estimateTokens(prompt);
 		const completionTokens = estimateTokens(result.text);
 
+		// OpenCode's renderer doesn't display reasoning_content, so when the
+		// model produced thinking we include a visible Thinking block in the
+		// content (kept also as reasoning_content for clients that support it).
+		let visibleContent = content;
+		if (result.thinkingText && visibleContent) {
+			visibleContent = `💭 Thinking:\n${result.thinkingText}\n\n${visibleContent}`;
+		} else if (result.thinkingText && !visibleContent) {
+			visibleContent = `💭 Thinking:\n${result.thinkingText}`;
+		}
+
 		const response: ChatCompletionResponse = {
 			id,
 			object: "chat.completion",
@@ -251,7 +261,7 @@ async function handleNonStreaming(
 					index: 0,
 					message: {
 						role: "assistant",
-						content,
+						content: visibleContent,
 						...(toolCalls ? { tool_calls: toolCalls } : {}),
 						// Surface reasoning/thinking text to the client (G8).
 						...(result.thinkingText ? { reasoning_content: result.thinkingText } : {}),
