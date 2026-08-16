@@ -100,6 +100,9 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 	private activeIndex = 0;
 	private readonly limitedAccounts = new Set<number>();
 
+	/** Round-robin counter so requests spread across ALL pool accounts. */
+	private static nextStartIndex = 0;
+
 	constructor(
 		auth: DeepSeekWebCredentials | DeepSeekWebCredentials[] | { accounts?: DeepSeekWebCredentials[] },
 	) {
@@ -185,6 +188,22 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 		reasoningEffort?: string | number | boolean;
 		stream?: boolean;
 	}): Promise<ReadableStream<Uint8Array>> {
+		// Round-robin start: spread requests across ALL pool accounts so the
+		// rotation pool is actually used (not just account 0). Skips accounts
+		// already marked limited.
+		if (this.accountPool.length > 1) {
+			const start = DeepSeekWebClient.nextStartIndex % this.accountPool.length;
+			DeepSeekWebClient.nextStartIndex++;
+			let idx = start;
+			for (let step = 0; step < this.accountPool.length; step++) {
+				if (!this.limitedAccounts.has(idx)) break;
+				idx = (idx + 1) % this.accountPool.length;
+			}
+			this.activeIndex = idx;
+			(this as unknown as { auth: DeepSeekWebCredentials }).auth = this.accountPool[idx]!;
+			this.chatSessionId = "";
+			this.parentMessageId = null;
+		}
 		return this.sendMessageWithRotation(params, 0);
 	}
 
@@ -237,16 +256,41 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 			if (!body) throw new Error("DeepSeek Web API returned empty response body");
 			return body;
 		} catch (err) {
-			// A rate limit already rotated the account inside
-			// fetchCompletionFromNode; retry ONCE on the fresh account. When
-			// every account is limited the RateLimitError propagates to the
-			// gateway, which returns a clear 429.
+			// Rotate on ANY hard error (rate limit, CDP failure, request
+			// timeout, connection error) — never burn the gateway's 300s route
+			// timeout on a wedged account. A RateLimitError already rotated
+			// inside fetchCompletionFromNode; other errors rotate here. Retry
+			// ONCE on the fresh account; when every account is bad the error
+			// propagates to the gateway.
+			const isAbort =
+				err instanceof DOMException && err.name === "AbortError";
+			const isCancelled =
+				err instanceof Error && /cancel/i.test(err.message);
 			if (
-				err instanceof RateLimitError &&
+				!isAbort &&
+				!isCancelled &&
 				attempt < 1 &&
 				this.accountPool.length > 1 &&
 				this.limitedAccounts.size < this.accountPool.length
 			) {
+				if (!(err instanceof RateLimitError)) {
+					this.limitedAccounts.add(this.activeIndex);
+					const next = pickNextAccount(
+						this.accountPool.length,
+						this.limitedAccounts,
+						this.activeIndex,
+					);
+					if (next !== -1) {
+						this.activeIndex = next;
+						(this as unknown as { auth: DeepSeekWebCredentials }).auth =
+							this.accountPool[next]!;
+						this.chatSessionId = "";
+						this.parentMessageId = null;
+						console.warn(
+							`[DeepSeekWebClient] error on account ${next === 0 ? this.accountPool.length : this.activeIndex}: ${err instanceof Error ? err.message : String(err)} — rotated to account ${next + 1}`,
+						);
+					}
+				}
 				console.warn(
 					`[DeepSeekWebClient] retrying on rotated account ${this.activeIndex + 1} (attempt ${attempt + 2})`,
 				);
@@ -669,6 +713,14 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 					);
 				},
 			);
+			// Hard per-request timeout: DeepSeek's web API can hang (stale
+			// session, silent rate limit). Fail fast so the rotation layer can
+			// switch to the next account instead of burning the gateway's 300s
+			// route timeout and leaving agents "stuck after one response".
+			const timeout = setTimeout(() => {
+				req.destroy(new Error("DeepSeek completion timed out after 90s"));
+			}, 90_000);
+			req.on("close", () => clearTimeout(timeout));
 			req.on("error", (e) => reject(new Error(`DeepSeek request error: ${e.message}`)));
 			signal?.addEventListener(
 				"abort",
