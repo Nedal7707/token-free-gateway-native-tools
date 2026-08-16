@@ -205,10 +205,11 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 			const page = await this.getPage();
 			// Auto-refresh: deepseek rotates its session token periodically. Before
 			// each request, re-read the CURRENT token + hif-leim + cookies from the
-			// live page (the web app always has the valid session) so we never send
-			// a stale bearer. Only the PRIMARY account (index 0) matches the live
-			// Chrome page; rotated accounts use their stored credentials only.
-			if (this.activeIndex === 0) await this.refreshSessionFromPage(page);
+			// live page of THIS account's Chrome profile (multi-profile setup: every
+			// account lives in its own profile on its own CDP port, so each account
+			// refreshes from its own live page — no stale credentials, no manual
+			// re-login).
+			await this.refreshSessionFromPage(page);
 			// FRESH SESSION PER REQUEST (fix 2026-08-16): the gateway's flattened
 			// prompt is SELF-CONTAINED — it already contains the entire conversation
 			// (system + all turns + tools + agentic directive). Reusing one
@@ -341,7 +342,22 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 	}
 
 	private getContext(): Promise<unknown> {
-		return BrowserManager.getInstance().getContext();
+		return BrowserManager.getInstance().getContext(this.activeCdpPort());
+	}
+
+	/** CDP port of the active account's dedicated Chrome profile. */
+	private activeCdpPort(): number {
+		const creds = this.accountPool[this.activeIndex];
+		return creds?.cdpPort ?? 9222;
+	}
+
+	/** Get the page from the ACTIVE account's Chrome profile. */
+	protected override async getPage(): Promise<Page> {
+		return BrowserManager.getInstance().getPage(
+			this.config.hostKey,
+			this.config.startUrl,
+			this.activeCdpPort(),
+		);
 	}
 
 	override async parseStream(

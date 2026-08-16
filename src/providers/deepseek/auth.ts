@@ -11,14 +11,161 @@ export interface DeepSeekWebCredentials {
 	userAgent: string;
 	/** Session-bound anti-bot header value captured from the web app (x-hif-leim). */
 	hifLeim?: string;
+	/**
+	 * CDP debug port of the Chrome profile this account is logged into.
+	 * Multi-profile rotation: each account lives in its own Chrome profile
+	 * (ports 9222..9226 by default) so all accounts stay logged in together.
+	 * Defaults to the configured CDP port when absent.
+	 */
+	cdpPort?: number;
 }
 
-export async function loginDeepseekWeb(params: {
-	onProgress: (msg: string) => void;
-	openUrl: (url: string) => Promise<boolean>;
-}): Promise<DeepSeekWebCredentials> {
-	const cdpUrl = getDefaultCdpUrl();
-	params.onProgress("Connecting to Chrome debug port...");
+/** CDP endpoint for a given debug port. */
+export function cdpUrlForPort(port: number): string {
+	return `http://127.0.0.1:${port}`;
+}
+
+/**
+ * Capture an already-logged-in DeepSeek session from a live page:
+ * cookies + bearer token. Returns null when no session is present.
+ */
+export async function captureDeepseekSessionFromPage(
+	page: import("playwright-core").Page,
+	context: import("playwright-core").BrowserContext,
+	onProgress?: (msg: string) => void,
+): Promise<DeepSeekWebCredentials | null> {
+	const existingCookies = await context.cookies(["https://chat.deepseek.com", "https://deepseek.com"]);
+	const cookieString = existingCookies.map((c) => `${c.name}=${c.value}`).join("; ");
+
+	const hasDeviceId = cookieString.includes("d_id=");
+	const hasSessionId = cookieString.includes("ds_session_id=");
+	const hasSessionInfo = cookieString.includes("HWSID=") || cookieString.includes("uuid=");
+
+	let bearer = "";
+	let userAgent = await page.evaluate(() => navigator.userAgent);
+
+	if (
+		!((hasDeviceId || hasSessionId || hasSessionInfo || existingCookies.length > 3) &&
+			cookieString.length > 10)
+	) {
+		return null;
+	}
+
+	onProgress?.("Found existing DeepSeek session!");
+
+	try {
+		await page.goto("https://chat.deepseek.com", { timeout: 5000 });
+	} catch {
+		// ignore navigation errors
+	}
+
+	try {
+		const storageSnapshot = await page.evaluate(() => {
+			const data: Record<string, string> = {};
+			const store = globalThis.localStorage;
+			for (let i = 0; i < store.length; i++) {
+				const key = store.key(i);
+				if (key) {
+					data[key] = store.getItem(key) ?? "";
+				}
+			}
+			return data;
+		});
+
+		for (const [key, value] of Object.entries(storageSnapshot)) {
+			if (key.toLowerCase().includes("token") || key.toLowerCase().includes("auth")) {
+				try {
+					const parsed: unknown = JSON.parse(value);
+					if (typeof parsed === "object" && parsed !== null && "token" in parsed) {
+						const token = (parsed as { token?: string }).token;
+						if (token) bearer = token;
+					} else if (typeof parsed === "string" && parsed.length > 20) {
+						bearer = parsed;
+					}
+				} catch {
+					if (value.length > 20) {
+						bearer = value;
+					}
+				}
+			}
+		}
+	} catch {
+		// ignore localStorage errors
+	}
+
+	if (!bearer) {
+		onProgress?.("Requesting DeepSeek API to capture token...");
+		try {
+			const response = await page.request.get("https://chat.deepseek.com/api/v0/users/current", {
+				headers: { Cookie: cookieString },
+			});
+			if (response.ok()) {
+				const data = (await response.json()) as {
+					data?: { biz_data?: { token?: string } };
+				};
+				bearer = data?.data?.biz_data?.token || "";
+			}
+		} catch {
+			// ignore API errors
+		}
+	}
+
+	if (!bearer) return null;
+
+	return {
+		cookie: cookieString,
+		bearer,
+		userAgent,
+	};
+}
+
+/**
+ * Connect to a CDP port and capture the DeepSeek session from its Chrome
+ * profile. Returns null when the port is unreachable or no session exists.
+ */
+export async function captureDeepseekSessionFromPort(
+	port: number,
+	onProgress?: (msg: string) => void,
+): Promise<DeepSeekWebCredentials | null> {
+	const wsUrl = await getChromeWebSocketUrl(cdpUrlForPort(port), 4000);
+	if (!wsUrl) return null;
+
+	const browser = await chromium.connectOverCDP(wsUrl, {
+		headers: getHeadersWithAuth(wsUrl),
+	});
+	try {
+		const context = browser.contexts()[0] || (await browser.newContext());
+		const pages = context.pages();
+		let page = pages.find(
+			(p) => p.url().includes("deepseek.com") || p.url().includes("chat.deepseek.com"),
+		);
+		if (!page) {
+			page = await context.newPage();
+			await page.goto("https://chat.deepseek.com", { waitUntil: "domcontentloaded" }).catch(() => {});
+			// Give the app a moment to load local storage
+			await new Promise((r) => setTimeout(r, 1500));
+		}
+		const creds = await captureDeepseekSessionFromPage(page, context, onProgress);
+		if (creds) creds.cdpPort = port;
+		return creds;
+	} finally {
+		await browser.close().catch(() => {});
+	}
+}
+
+/**
+ * Launch a fresh DeepSeek login flow on a given CDP port (used when the
+ * profile is not logged in yet). Interactive: the user logs in in the
+ * opened browser window; the session is captured automatically.
+ */
+export async function loginDeepseekWebOnPort(
+	port: number,
+	params: {
+		onProgress: (msg: string) => void;
+	},
+): Promise<DeepSeekWebCredentials> {
+	const cdpUrl = cdpUrlForPort(port);
+	params.onProgress(`Connecting to Chrome debug port ${port}...`);
 
 	let wsUrl: string | null = null;
 	for (let i = 0; i < 10; i++) {
@@ -50,93 +197,15 @@ export async function loginDeepseekWeb(params: {
 	}
 
 	params.onProgress("Checking for existing DeepSeek session...");
-	const existingCookies = await context.cookies([
-		"https://chat.deepseek.com",
-		"https://deepseek.com",
-	]);
-	const cookieString = existingCookies.map((c) => `${c.name}=${c.value}`).join("; ");
-
-	const hasDeviceId = cookieString.includes("d_id=");
-	const hasSessionId = cookieString.includes("ds_session_id=");
-	const hasSessionInfo = cookieString.includes("HWSID=") || cookieString.includes("uuid=");
-
-	let bearer = "";
-	let userAgent = await page.evaluate(() => navigator.userAgent);
-
-	if (
-		(hasDeviceId || hasSessionId || hasSessionInfo || existingCookies.length > 3) &&
-		cookieString.length > 10
-	) {
-		params.onProgress("Found existing DeepSeek session!");
-
-		try {
-			await page.goto("https://chat.deepseek.com", { timeout: 5000 });
-		} catch {
-			// ignore navigation errors
-		}
-
-		try {
-			const storageSnapshot = await page.evaluate(() => {
-				const data: Record<string, string> = {};
-				const store = globalThis.localStorage;
-				for (let i = 0; i < store.length; i++) {
-					const key = store.key(i);
-					if (key) {
-						data[key] = store.getItem(key) ?? "";
-					}
-				}
-				return data;
-			});
-
-			for (const [key, value] of Object.entries(storageSnapshot)) {
-				if (key.toLowerCase().includes("token") || key.toLowerCase().includes("auth")) {
-					try {
-						const parsed: unknown = JSON.parse(value);
-						if (typeof parsed === "object" && parsed !== null && "token" in parsed) {
-							const token = (parsed as { token?: string }).token;
-							if (token) bearer = token;
-						} else if (typeof parsed === "string" && parsed.length > 20) {
-							bearer = parsed;
-						}
-					} catch {
-						if (value.length > 20) {
-							bearer = value;
-						}
-					}
-				}
-			}
-		} catch {
-			// ignore localStorage errors
-		}
-
-		if (!bearer) {
-			params.onProgress("Requesting DeepSeek API to capture token...");
-			try {
-				const response = await page.request.get("https://chat.deepseek.com/api/v0/users/current", {
-					headers: { Cookie: cookieString },
-				});
-				if (response.ok()) {
-					const data = (await response.json()) as {
-						data?: { biz_data?: { token?: string } };
-					};
-					bearer = data?.data?.biz_data?.token || "";
-				}
-			} catch {
-				// ignore API errors
-			}
-		}
-
-		if (bearer) {
-			return {
-				cookie: cookieString,
-				bearer,
-				userAgent,
-			};
-		}
+	const existing = await captureDeepseekSessionFromPage(page, context, params.onProgress);
+	if (existing) {
+		existing.cdpPort = port;
+		await browser.close().catch(() => {});
+		return existing;
 	}
 
 	await page.goto("https://chat.deepseek.com");
-	userAgent = await page.evaluate(() => navigator.userAgent);
+	const userAgent = await page.evaluate(() => navigator.userAgent);
 
 	params.onProgress(
 		"Please login to DeepSeek in the opened browser window. The session token will be captured automatically once you are logged in.",
@@ -176,8 +245,8 @@ export async function loginDeepseekWeb(params: {
 					resolved = true;
 					clearTimeout(timeout);
 					if (checkInterval) clearInterval(checkInterval);
-					console.log(`[DeepSeek] Credentials captured`);
-					resolve({ cookie: cookieStr, bearer: capturedBearer, userAgent });
+					console.log(`[DeepSeek] Credentials captured for port ${port}`);
+					resolve({ cookie: cookieStr, bearer: capturedBearer, userAgent, cdpPort: port });
 				}
 			} catch (e: unknown) {
 				console.error(`[DeepSeek] Failed to fetch cookies: ${String(e)}`);
@@ -222,4 +291,15 @@ export async function loginDeepseekWeb(params: {
 
 		checkInterval = setInterval(tryResolve, 2000);
 	});
+}
+
+/**
+ * Backward-compatible login entry used by the webauth CLI
+ * (`loginFn({ onProgress, openUrl })`). Delegates to the default CDP port.
+ */
+export async function loginDeepseekWeb(params: {
+	onProgress: (msg: string) => void;
+	openUrl: (url: string) => Promise<boolean>;
+}): Promise<DeepSeekWebCredentials> {
+	return loginDeepseekWebOnPort(9222, { onProgress: params.onProgress });
 }

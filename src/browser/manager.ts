@@ -19,10 +19,16 @@ export interface BrowserCookie {
 class BrowserManager {
 	private static instance: BrowserManager | null = null;
 
-	private browser: Browser | null = null;
-	private context: BrowserContext | null = null;
-	private connecting: Promise<BrowserContext> | null = null;
-	private disconnected = false;
+	/** Per-CDP-port connection state (multi-profile Chrome support). */
+	private connections = new Map<
+		string,
+		{
+			browser: Browser | null;
+			context: BrowserContext | null;
+			connecting: Promise<BrowserContext> | null;
+			disconnected: boolean;
+		}
+	>();
 
 	static getInstance(): BrowserManager {
 		if (!BrowserManager.instance) {
@@ -31,34 +37,52 @@ class BrowserManager {
 		return BrowserManager.instance;
 	}
 
+	/** Resolve the CDP URL for a port. Default port uses the configured URL. */
+	private cdpUrlForPort(port?: number): string {
+		if (port === undefined) return getDefaultCdpUrl();
+		return `http://127.0.0.1:${port}`;
+	}
+
+	private stateForPort(port?: number) {
+		const key = this.cdpUrlForPort(port);
+		let state = this.connections.get(key);
+		if (!state) {
+			state = { browser: null, context: null, connecting: null, disconnected: false };
+			this.connections.set(key, state);
+		}
+		return state;
+	}
+
 	/**
-	 * Get the shared BrowserContext, connecting if needed.
-	 * Concurrent callers share the same in-flight connection promise.
+	 * Get the BrowserContext for a CDP port (default: configured port),
+	 * connecting if needed. Concurrent callers share the same in-flight
+	 * connection promise per port.
 	 */
-	async getContext(): Promise<BrowserContext> {
-		if (this.context && !this.disconnected) {
-			return this.context;
+	async getContext(port?: number): Promise<BrowserContext> {
+		const state = this.stateForPort(port);
+		if (state.context && !state.disconnected) {
+			return state.context;
 		}
 
-		if (this.connecting) {
-			return this.connecting;
+		if (state.connecting) {
+			return state.connecting;
 		}
 
-		this.connecting = this.connect();
+		state.connecting = this.connect(port);
 		try {
-			const ctx = await this.connecting;
+			const ctx = await state.connecting;
 			return ctx;
 		} finally {
-			this.connecting = null;
+			state.connecting = null;
 		}
 	}
 
 	/**
-	 * Get or create a page for the given domain.
+	 * Get or create a page for the given domain on a specific CDP port.
 	 * Reuses an existing tab whose URL contains the domain string.
 	 */
-	async getPage(domain: string, fallbackUrl?: string): Promise<Page> {
-		const ctx = await this.getContext();
+	async getPage(domain: string, fallbackUrl?: string, port?: number): Promise<Page> {
+		const ctx = await this.getContext(port);
 		const pages = ctx.pages();
 		const existing = pages.find((p) => p.url().includes(domain));
 		if (existing) return existing;
@@ -71,10 +95,10 @@ class BrowserManager {
 	}
 
 	/**
-	 * Inject cookies into the shared browser context.
+	 * Inject cookies into a browser context (default port).
 	 */
-	async addCookies(cookies: BrowserCookie[]): Promise<void> {
-		const ctx = await this.getContext();
+	async addCookies(cookies: BrowserCookie[], port?: number): Promise<void> {
+		const ctx = await this.getContext(port);
 		if (cookies.length > 0) {
 			try {
 				await ctx.addCookies(cookies);
@@ -90,7 +114,8 @@ class BrowserManager {
 	 * Check whether Chrome is reachable and the CDP connection is alive.
 	 */
 	async isHealthy(): Promise<boolean> {
-		if (this.disconnected || !this.browser || !this.context) {
+		const state = this.stateForPort();
+		if (state.disconnected || !state.browser || !state.context) {
 			// Try a lightweight CDP probe even without an active connection
 			const cdpUrl = getDefaultCdpUrl();
 			const ws = await getChromeWebSocketUrl(cdpUrl, 3000);
@@ -99,7 +124,7 @@ class BrowserManager {
 
 		try {
 			// Verify the context is still responsive
-			const pages = this.context.pages();
+			const pages = state.context.pages();
 			return pages.length >= 0; // will throw if disconnected
 		} catch {
 			return false;
@@ -110,24 +135,27 @@ class BrowserManager {
 	 * Graceful shutdown: disconnect from Chrome without killing it.
 	 */
 	async shutdown(): Promise<void> {
-		if (this.browser) {
-			try {
-				this.browser.removeAllListeners("disconnected");
-				await this.browser.close().catch(() => {});
-			} catch {
-				// ignore
+		for (const state of this.connections.values()) {
+			if (state.browser) {
+				try {
+					state.browser.removeAllListeners("disconnected");
+					await state.browser.close().catch(() => {});
+				} catch {
+					// ignore
+				}
 			}
+			state.browser = null;
+			state.context = null;
+			state.disconnected = true;
+			state.connecting = null;
 		}
-		this.browser = null;
-		this.context = null;
-		this.disconnected = true;
-		this.connecting = null;
+		this.connections.clear();
 	}
 
 	// ── internal ──────────────────────────────────────────────────────
 
-	private async connect(): Promise<BrowserContext> {
-		const cdpUrl = getDefaultCdpUrl();
+	private async connect(port?: number): Promise<BrowserContext> {
+		const cdpUrl = this.cdpUrlForPort(port);
 		console.log(`[BrowserManager] Connecting to Chrome at ${cdpUrl}...`);
 
 		let wsUrl: string | null = null;
@@ -135,8 +163,8 @@ class BrowserManager {
 			wsUrl = await getChromeWebSocketUrl(cdpUrl, 2000);
 			if (wsUrl) break;
 
-			// On first failure, try to auto-start Chrome
-			if (attempt === 2) {
+			// On first failure, try to auto-start Chrome (default port only)
+			if (attempt === 2 && port === undefined) {
 				await this.tryAutoStartChrome();
 			}
 
@@ -159,15 +187,16 @@ class BrowserManager {
 			throw new Error("[BrowserManager] CDP connection returned no browser context");
 		}
 
-		this.browser = browser;
-		this.context = ctx;
-		this.disconnected = false;
+		const state = this.stateForPort(port);
+		state.browser = browser;
+		state.context = ctx;
+		state.disconnected = false;
 
 		browser.on("disconnected", () => {
-			console.warn("[BrowserManager] Chrome disconnected. Will auto-reconnect on next request.");
-			this.browser = null;
-			this.context = null;
-			this.disconnected = true;
+			console.warn(`[BrowserManager] Chrome at ${cdpUrl} disconnected. Will auto-reconnect on next request.`);
+			state.browser = null;
+			state.context = null;
+			state.disconnected = true;
 		});
 
 		const pageCount = ctx.pages().length;
