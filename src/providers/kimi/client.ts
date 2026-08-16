@@ -58,7 +58,16 @@ export class KimiWebClient extends BaseApiClient<KimiWebAuth> {
 		const ctx = await bm.getContext();
 		const cookies = await ctx.cookies([this.baseUrl]);
 		const kimiAuthCookie = cookies.find((c) => c.name === "kimi-auth")?.value;
-		const authToken = this.auth.accessToken || kimiAuthCookie;
+		let authToken = this.auth.accessToken || kimiAuthCookie;
+
+		// Auto-refresh: kimi access tokens are short-lived (~15 min). If the
+		// stored token is expired (or missing), use the refresh_token to get a
+		// fresh one from the kimi account API.
+		if (!authToken || this.isKimiTokenExpired(authToken)) {
+			const refreshed = await this.refreshKimiToken(page);
+			if (refreshed) authToken = refreshed;
+		}
+
 		if (!authToken) {
 			return {
 				ok: false,
@@ -75,11 +84,13 @@ export class KimiWebClient extends BaseApiClient<KimiWebAuth> {
 				message,
 				kimiAuthToken,
 				scenario,
+				thinking,
 			}: {
 				baseUrl: string;
 				message: string;
 				kimiAuthToken: string;
 				scenario: string;
+				thinking: boolean;
 			}) => {
 				const req = {
 					scenario,
@@ -88,7 +99,8 @@ export class KimiWebClient extends BaseApiClient<KimiWebAuth> {
 						blocks: [{ message_id: "", text: { content: message } }],
 						scenario,
 					},
-					options: { thinking: false },
+					// Real reasoning: enable thinking when the client asks for effort.
+					options: { thinking },
 				};
 				const enc = new TextEncoder().encode(JSON.stringify(req));
 				const buf = new ArrayBuffer(5 + enc.byteLength);
@@ -153,6 +165,7 @@ export class KimiWebClient extends BaseApiClient<KimiWebAuth> {
 				baseUrl: this.baseUrl,
 				message: params.message,
 				kimiAuthToken: authToken,
+				thinking: params.reasoningEffort !== undefined && params.reasoningEffort !== false,
 				scenario: model.includes("search")
 					? "SCENARIO_SEARCH"
 					: model.includes("research")
@@ -172,6 +185,46 @@ export class KimiWebClient extends BaseApiClient<KimiWebAuth> {
 		}
 		const escaped = JSON.stringify(result.text);
 		return { ok: true, data: `data: {"text":${escaped}}\n\ndata: [DONE]\n\n` };
+	}
+
+	/** True if the kimi JWT access token is expired or unparseable. */
+	private isKimiTokenExpired(token: string): boolean {
+		try {
+			const payload = JSON.parse(
+				Buffer.from(token.split(".")[1] ?? "", "base64").toString("utf8"),
+			) as { exp?: number };
+			return typeof payload.exp === "number" && payload.exp * 1000 < Date.now();
+		} catch {
+			return true;
+		}
+	}
+
+	/** Use the refresh_token to mint a fresh kimi access token. */
+	private async refreshKimiToken(page: Page): Promise<string | null> {
+		const refreshToken = this.auth.refreshToken;
+		if (!refreshToken) return null;
+		try {
+			const result = await page.evaluate(
+				async ({ rt }: { rt: string }) => {
+					const res = await fetch("https://www.kimi.com/api/auth/token/refresh", {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ refresh_token: rt }),
+					});
+					if (!res.ok) return null;
+					const data = (await res.json()) as { access_token?: string };
+					return data.access_token ?? null;
+				},
+				{ rt: refreshToken },
+			);
+			if (result && typeof result === "string" && result.length > 50) {
+				(this.auth as { accessToken?: string }).accessToken = result;
+				return result;
+			}
+			return null;
+		} catch {
+			return null;
+		}
 	}
 
 	protected parseStreamImpl(

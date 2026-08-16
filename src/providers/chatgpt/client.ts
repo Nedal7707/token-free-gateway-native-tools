@@ -329,7 +329,10 @@ export class ChatGPTWebClient extends BaseApiClient<ChatGPTWebAuth> {
 		if (!responseData.ok) {
 			if (responseData.status === 403) {
 				console.log("[ChatGPT Web] 403 from API, falling back to DOM simulation");
-				return this.chatCompletionsViaDOM({ message: params.message, signal: params.signal });
+				// DOM path types the message into the chat box — strip any
+				// "Human:" wrapper so the UI receives the plain user text.
+				const clean = params.message.replace(/^Human:\s*/i, "");
+				return this.chatCompletionsViaDOM({ message: clean, signal: params.signal });
 			}
 			throwIfSessionExpired(
 				this.providerId,

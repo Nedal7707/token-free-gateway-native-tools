@@ -146,6 +146,7 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 			tools: params.tools,
 			toolChoice: params.toolChoice,
 			stream: params.stream,
+			reasoningEffort: params.reasoningEffort,
 		});
 		if (!body) throw new Error("DeepSeek Web API returned empty response body");
 		return body;
@@ -323,6 +324,7 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 		tools?: unknown[];
 		toolChoice?: unknown;
 		stream?: boolean;
+		reasoningEffort?: string | number | boolean;
 	}) {
 		const targetPath = "/api/v0/chat/completion";
 		const challenge = await this.createPowChallenge(targetPath);
@@ -338,8 +340,10 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 			model_type: null,
 			prompt: params.message,
 			ref_file_ids: params.fileIds || [],
-			// Match the web UI: flash models answer with thinking disabled.
-			thinking_enabled: false,
+			// Real reasoning: thinking enabled when the client asks for effort
+			// (or by default for reasoning-capable models). DeepSeek's web API
+			// returns reasoning_content in the stream when thinking is on.
+			thinking_enabled: params.reasoningEffort !== undefined && params.reasoningEffort !== false,
 			search_enabled: params.searchEnabled ?? true,
 			action: null,
 			preempt: params.preempt ?? false,
