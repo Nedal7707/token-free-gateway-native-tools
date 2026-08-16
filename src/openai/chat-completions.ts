@@ -220,11 +220,21 @@ export async function handleChatCompletions(
 	// Only on a >=400 error with tools do we fall back to plain chat.
 	const firstBody = await first.clone().text();
 	const isEmptyOk = first.status === 200 && (!firstBody || firstBody.length < 60);
-	if (isEmptyOk || (hasTools && first.status >= 400)) {
+	// Streaming empty turn: a valid 200 SSE stream that carried NO content, NO
+	// tool calls, and NO reasoning (deepseek stale session, kimi token expiry)
+	// looks normal but delivers an empty assistant turn — OpenCode records it
+	// as finish "stop" with 0 tokens and the agent stops after one round.
+	// Detect it on the buffered SSE body so the retry can fire.
+	const streamHasPayload = /"(content|tool_calls|reasoning_content)"/.test(firstBody);
+	const isEmptyStreamTurn =
+		first.status === 200 && body.stream && firstBody.length > 0 && !streamHasPayload;
+	const isStreamError =
+		first.status === 200 && body.stream && firstBody.includes('"server_error"');
+	if (isEmptyOk || isEmptyStreamTurn || isStreamError || (hasTools && first.status >= 400)) {
 		console.log(
-			`[chat-completions] request returned empty/error (${first.status}), retrying once for ${model}`,
+			`[chat-completions] request returned empty/error (${first.status}, stream=${body.stream}, emptyTurn=${isEmptyStreamTurn}), retrying once for ${model}`,
 		);
-		const keepTools = isEmptyOk; // empty content: keep tools; error: strip
+		const keepTools = isEmptyOk || isEmptyStreamTurn; // empty content: keep tools; error: strip
 		const retryBody: ChatCompletionRequest = hasTools && !keepTools
 			? { ...body, tools: undefined, tool_choice: undefined }
 			: body;
