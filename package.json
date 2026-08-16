@@ -8,6 +8,8 @@
 	"scripts": {
 		"dev": "bun --hot index.ts",
 		"start": "bun index.ts",
+		"watchdog": "bun scripts/watchdog.mjs",
+		"watchdog:once": "bun scripts/watchdog.mjs --once",
 		"test": "bun test",
 		"check": "bunx @biomejs/biome check --write .",
 		"lint": "bunx @biomejs/biome lint .",

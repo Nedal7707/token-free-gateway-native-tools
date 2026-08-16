@@ -67,7 +67,7 @@ export const MODEL_CONTEXT_WINDOWS = {
 	"glm-4.7-flash": 203000,
 	"glm-4-plus": 128000,
 	"glm-4-think": 128000,
-	"kimi-k3": 1048560,
+	"kimi-k3": 128000,
 	"kimi-k2.7-code": 262144,
 	"kimi-k2.6": 262144,
 	"kimi-k2.5": 262144,
@@ -302,6 +302,14 @@ function compactWithDrop(model, messages, budget) {
 
 	let keepFrom = 0;
 	let size = messages.reduce((s, m) => s + messageTokens(m), 0);
+	// Deterministic extractive memory: collect the text of every dropped user
+	// message and the final dropped assistant text so the summary note can
+	// preserve the task statement and the gist of the trimmed turns (perfect
+	// memory: early context survives compaction instead of vanishing).
+	const droppedMemory = [];
+	const droppedAssistantTail = [];
+	let droppedMemoryChars = 0;
+	const DROPPED_MEMORY_LIMIT = 6_000; // chars of preserved early-context text
 
 	for (let i = 0; i < rest.length && size > budget; i++) {
 		// Never drop the final user message.
@@ -312,6 +320,20 @@ function compactWithDrop(model, messages, budget) {
 		// Tool results are only dropped WITH their assistant tool_calls (handled
 		// by the assistant branch below when i+1 is a tool message).
 		if (m?.role === "tool") continue;
+
+		// Preserve memory of the dropped turn (user = task/instruction content,
+		// assistant = the agent's own prior reasoning/conclusion).
+		if (m?.role === "user") {
+			const text = messageText(m);
+			if (text && droppedMemoryChars < DROPPED_MEMORY_LIMIT) {
+				const room = DROPPED_MEMORY_LIMIT - droppedMemoryChars;
+				droppedMemory.push(text.slice(0, room));
+				droppedMemoryChars += Math.min(text.length, room);
+			}
+		} else if (m?.role === "assistant" && !m.tool_calls) {
+			const text = messageText(m);
+			if (text) droppedAssistantTail.push(text);
+		}
 
 		// When dropping an assistant tool_calls message, drop its tool results too.
 		let unit = [m];
@@ -337,14 +359,28 @@ function compactWithDrop(model, messages, budget) {
 	const kept = rest.slice(keepFrom);
 
 	// If we dropped anything, insert a compact summary marker so the model
-	// knows context was trimmed.
+	// knows context was trimmed — and carries the extractive memory of the
+	// dropped turns (task statement + prior reasoning) so nothing important
+	// is truly lost.
 	if (droppedTokens > 0) {
+		const memoryParts = [];
+		if (droppedMemory.length > 0) {
+			memoryParts.push(
+				"Earlier conversation content (preserved for memory):\n" +
+					droppedMemory.join("\n---\n").slice(0, DROPPED_MEMORY_LIMIT),
+			);
+		}
+		if (droppedAssistantTail.length > 0) {
+			const tail = droppedAssistantTail[droppedAssistantTail.length - 1];
+			if (tail) memoryParts.push(`Prior agent conclusion: ${tail.slice(0, 1_500)}`);
+		}
 		const summaryNote = {
 			role: "system",
 			content:
 				"[context trimmed: older conversation turns were removed to fit the model's context window. " +
 				`Approximately ${Math.round(droppedTokens)} tokens of earlier turns were dropped. ` +
-				"Do not mention this unless relevant; continue based on the remaining context.]",
+				(memoryParts.length > 0 ? `${memoryParts.join("\n\n")}\n\n` : "") +
+				"Do not mention this unless relevant; continue based on the remaining context and the preserved memory above.]",
 		};
 		out.push(summaryNote);
 	}

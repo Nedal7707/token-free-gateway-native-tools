@@ -351,6 +351,7 @@ async function handleNonStreaming(
 
 type SseWriter = {
 	writeChunk(id: string, model: string, choices: Parameters<typeof makeChunk>[2]): void;
+	writeUsage(id: string, model: string, promptTokens: number, completionTokens: number): void;
 	done(): void;
 	error(message: string): void;
 	close(): void;
@@ -362,6 +363,26 @@ function createSseWriter(controller: ReadableStreamDefaultController<Uint8Array>
 	return {
 		writeChunk(id, model, choices) {
 			emit(sseEvent(JSON.stringify(makeChunk(id, model, choices))));
+		},
+		writeUsage(id, model, promptTokens, completionTokens) {
+			// Final chunk per OpenAI convention: empty choices + usage, so
+			// clients (OpenCode) record real token counts instead of 0.
+			emit(
+				sseEvent(
+					JSON.stringify({
+						id,
+						object: "chat.completion.chunk",
+						created: Math.floor(Date.now() / 1000),
+						model,
+						choices: [],
+						usage: {
+							prompt_tokens: promptTokens,
+							completion_tokens: completionTokens,
+							total_tokens: promptTokens + completionTokens,
+						},
+					}),
+				),
+			);
 		},
 		done() {
 			emit(sseDone());
@@ -426,6 +447,7 @@ async function handleStreaming(
 	const readable = new ReadableStream({
 		async start(controller) {
 			const w = createSseWriter(controller);
+			const promptTokens = estimateTokens(prompt);
 			try {
 				w.writeChunk(id, model, [{ index: 0, delta: { role: "assistant" }, finish_reason: null }]);
 
@@ -454,10 +476,11 @@ async function handleStreaming(
 					} else {
 						w.writeChunk(id, model, [{ index: 0, delta: {}, finish_reason: "stop" }]);
 					}
+					w.writeUsage(id, model, promptTokens, estimateTokens(collected.join("")));
 				} else if (!hasTools) {
-					await streamWithoutTools(w, id, model, providerStream, client);
+					await streamWithoutTools(w, id, model, providerStream, client, promptTokens);
 				} else {
-					await streamWithTools(w, id, model, providerStream, body, client);
+					await streamWithTools(w, id, model, providerStream, body, client, promptTokens);
 				}
 
 				w.done();
@@ -480,6 +503,7 @@ async function streamWithoutTools(
 	model: string,
 	providerStream: ReadableStream<Uint8Array>,
 	client: WebProviderClient,
+	promptTokens: number,
 ) {
 	const chunks: string[] = [];
 	const result = await client.parseStream(providerStream, (delta) => {
@@ -492,6 +516,7 @@ async function streamWithoutTools(
 		]);
 	}
 	w.writeChunk(id, model, [{ index: 0, delta: {}, finish_reason: "stop" }]);
+	w.writeUsage(id, model, promptTokens, estimateTokens(chunks.join("")));
 }
 
 async function streamWithTools(
@@ -501,6 +526,7 @@ async function streamWithTools(
 	providerStream: ReadableStream<Uint8Array>,
 	body: ChatCompletionRequest,
 	client: WebProviderClient,
+	promptTokens: number,
 ) {
 	const result = await client.parseStream(providerStream);
 	const { content, toolCalls, finishReason } = parseToolResponse(result.text, body.tools);
@@ -526,6 +552,7 @@ async function streamWithTools(
 		}
 		w.writeChunk(id, model, [{ index: 0, delta: {}, finish_reason: "stop" }]);
 	}
+	w.writeUsage(id, model, promptTokens, estimateTokens(result.text));
 }
 
 function jsonError(message: string, status: number): Response {
