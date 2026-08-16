@@ -14,14 +14,26 @@ export interface ParsedToolCall {
 	arguments: Record<string, unknown>;
 }
 
-const FENCED_REGEX = /```tool_json\s*\n?\s*(\{[\s\S]*\})\s*\n?\s*```/;
+const FENCED_REGEX = /```tool_json\s*\n?\s*(\{[\s\S]*?\})\s*\n?\s*```/g;
 const BARE_JSON_REGEX = /\{\s*"tool"\s*:\s*"([^"]+)"\s*,\s*"parameters"\s*:\s*(\{[\s\S]*?\})\s*\}/;
 const XML_TOOL_REGEX = /<tool_call[^>]*>([\s\S]*?)<\/tool_call>/;
 const OPENAI_TOOL_CALLS_REGEX =
 	/\{\s*"tool_calls"\s*:\s*\[\s*(\{[\s\S]*?\})\s*(?:,[\s\S]*?)?\]\s*\}/;
 
 export function extractToolCalls(text: string): ParsedToolCall[] {
-	// Try extracting multiple XML tool_calls first
+	// 1. Extract ALL fenced tool_json blocks (supports inline JSON on the same
+	// line as the fence, and multiple back-to-back blocks in one response).
+	const fencedMatches = [...text.matchAll(FENCED_REGEX)];
+	if (fencedMatches.length > 0) {
+		const calls: ParsedToolCall[] = [];
+		for (const match of fencedMatches) {
+			const parsed = match[1] ? parseToolJson(match[1]) : null;
+			if (parsed) calls.push(parsed);
+		}
+		if (calls.length > 0) return calls;
+	}
+
+	// 2. Try extracting multiple XML tool_calls
 	const xmlMatches = [...text.matchAll(/<tool_call[^>]*>([\s\S]*?)<\/tool_call>/g)];
 	if (xmlMatches.length > 0) {
 		const calls: ParsedToolCall[] = [];
@@ -32,14 +44,14 @@ export function extractToolCalls(text: string): ParsedToolCall[] {
 		if (calls.length > 0) return calls;
 	}
 
-	// Try single extraction
+	// 3. Try single extraction
 	const single = extractSingleToolCall(text);
 	return single ? [single] : [];
 }
 
 export function extractSingleToolCall(text: string): ParsedToolCall | null {
 	// 1. Fenced code block
-	const fenced = FENCED_REGEX.exec(text);
+	const fenced = /```tool_json\s*\n?\s*(\{[\s\S]*?\})\s*\n?\s*```/.exec(text);
 	if (fenced?.[1]) return parseToolJson(fenced[1]);
 
 	// 2. OpenAI-style tool_calls array
@@ -80,15 +92,26 @@ function parseToolJson(raw: string): ParsedToolCall | null {
 			cleaned += "}".repeat(opens - closes);
 		}
 
-		const obj = JSON.parse(cleaned);
+		let obj: unknown;
+		try {
+			obj = JSON.parse(cleaned);
+		} catch {
+			// Repair invalid backslash escapes (e.g. Windows paths like
+			// "C:\VectorHQ" emitted as unescaped backslashes) then retry.
+			cleaned = cleaned.replace(/\\(?!["\\/bfnrtu])/g, "\\\\");
+			obj = JSON.parse(cleaned);
+		}
 
 		// Format: {"tool":"name","parameters":{...}}
-		if (typeof obj.tool === "string") {
-			return { name: obj.tool, arguments: obj.parameters ?? {} };
-		}
-		// Format: {"name":"...","arguments":{...}}
-		if (typeof obj.name === "string") {
-			return { name: obj.name, arguments: obj.arguments ?? {} };
+		if (typeof obj === "object" && obj !== null) {
+			const o = obj as { tool?: string; name?: string; parameters?: unknown; arguments?: unknown };
+			if (typeof o.tool === "string") {
+				return { name: o.tool, arguments: (o.parameters as Record<string, unknown>) ?? {} };
+			}
+			// Format: {"name":"...","arguments":{...}}
+			if (typeof o.name === "string") {
+				return { name: o.name, arguments: (o.arguments as Record<string, unknown>) ?? {} };
+			}
 		}
 
 		return null;
@@ -98,8 +121,10 @@ function parseToolJson(raw: string): ParsedToolCall | null {
 }
 
 export function hasToolCall(text: string): boolean {
+	// Fenced blocks: check for at least one parseable tool_json block
+	const fenced = [...text.matchAll(FENCED_REGEX)];
+	if (fenced.some((m) => m[1] && parseToolJson(m[1]))) return true;
 	return (
-		FENCED_REGEX.test(text) ||
 		BARE_JSON_REGEX.test(text) ||
 		XML_TOOL_REGEX.test(text) ||
 		OPENAI_TOOL_CALLS_REGEX.test(text)

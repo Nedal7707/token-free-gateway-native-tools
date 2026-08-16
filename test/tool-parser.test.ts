@@ -79,6 +79,30 @@ describe("extractToolCalls", () => {
 		expect(result[0]?.name).toBe("exec");
 	});
 
+	test("extracts multiple fenced tool_json blocks (inline format)", () => {
+		const text = [
+			'```tool_json {"tool":"read","parameters":{"filePath":"C:\\VectorHQ\\a.md"}} ```',
+			'```tool_json {"tool":"read","parameters":{"filePath":"C:\\VectorHQ\\b.md"}} ```',
+			'```tool_json {"tool":"glob","parameters":{"pattern":"*.ts"}} ```',
+		].join("\n");
+		const result = extractToolCalls(text);
+		expect(result).toHaveLength(3);
+		expect(result[0]?.name).toBe("read");
+		expect(result[1]?.name).toBe("read");
+		expect(result[2]?.name).toBe("glob");
+		// Windows backslashes must be preserved (repaired, not dropped)
+		expect((result[0]?.arguments as { filePath: string }).filePath).toBe(
+			"C:\\VectorHQ\\a.md",
+		);
+	});
+
+	test("repairs invalid backslash escapes in Windows paths", () => {
+		const text = '```tool_json {"tool":"read","parameters":{"filePath":"C:\\VectorHQ\\x"}} ```';
+		const result = extractToolCalls(text);
+		expect(result).toHaveLength(1);
+		expect((result[0]?.arguments as { filePath: string }).filePath).toBe("C:\\VectorHQ\\x");
+	});
+
 	test("returns empty array for plain text", () => {
 		expect(extractToolCalls("No tools here")).toEqual([]);
 	});
