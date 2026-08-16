@@ -60,12 +60,37 @@ export class KimiWebClient extends BaseApiClient<KimiWebAuth> {
 		const kimiAuthCookie = cookies.find((c) => c.name === "kimi-auth")?.value;
 		let authToken = this.auth.accessToken || kimiAuthCookie;
 
-		// Auto-refresh: kimi access tokens are short-lived (~15 min). If the
-		// stored token is expired (or missing), use the refresh_token to get a
-		// fresh one from the kimi account API.
+		// Auto-refresh: kimi access tokens are short-lived (~15 min). First try
+		// the refresh_token API; if that fails, read the CURRENT token from the
+		// page's localStorage (the web app always holds the valid session), and
+		// as a last resort reload the page so the app mints a fresh token.
 		if (!authToken || this.isKimiTokenExpired(authToken)) {
 			const refreshed = await this.refreshKimiToken(page);
-			if (refreshed) authToken = refreshed;
+			if (refreshed) {
+				authToken = refreshed;
+			} else {
+				const pageToken = await this.readTokenFromPage(page);
+				if (pageToken) {
+					authToken = pageToken;
+					(this.auth as { accessToken?: string }).accessToken = pageToken;
+				}
+				if (!authToken || this.isKimiTokenExpired(authToken)) {
+					// Reload the page: the app re-initializes and mints a fresh
+					// token on load when the old one is expired.
+					try {
+						await page.goto(this.baseUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+						await new Promise((r) => setTimeout(r, 4000));
+						const fresh = await this.readTokenFromPage(page);
+						if (fresh && !this.isKimiTokenExpired(fresh)) {
+							authToken = fresh;
+							(this.auth as { accessToken?: string }).accessToken = fresh;
+							console.log("[KimiWebClient] token refreshed via page reload");
+						}
+					} catch {
+						// ignore reload errors
+					}
+				}
+			}
 		}
 
 		if (!authToken) {
@@ -196,6 +221,27 @@ export class KimiWebClient extends BaseApiClient<KimiWebAuth> {
 			return typeof payload.exp === "number" && payload.exp * 1000 < Date.now();
 		} catch {
 			return true;
+		}
+	}
+
+	/** Read the current access token from the page's localStorage. */
+	private async readTokenFromPage(page: Page): Promise<string | null> {
+		try {
+			const result = await page.evaluate(() => {
+				const get = (k: string) => {
+					try {
+						return localStorage.getItem(k) || "";
+					} catch {
+						return "";
+					}
+				};
+				const raw = get("access_token");
+				if (raw && raw.length > 50) return raw;
+				return null;
+			});
+			return typeof result === "string" && result.length > 50 ? result : null;
+		} catch {
+			return null;
 		}
 	}
 

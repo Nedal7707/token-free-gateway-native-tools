@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import https from "node:https";
 import type { Page } from "playwright-core";
 import { BaseApiClient } from "../factory/base-api-client.ts";
+import { BrowserManager } from "../../browser/manager.ts";
 import type { ApiClientConfig, NormalizedSendParams } from "../factory/types.ts";
 import { parseCookieHeader } from "../shared/cookie-parser.ts";
 import { throwIfSessionExpired } from "../shared/error-guard.ts";
@@ -130,7 +131,12 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 		reasoningEffort?: string | number | boolean;
 		stream?: boolean;
 	}): Promise<ReadableStream<Uint8Array>> {
-		await this.getPage();
+		const page = await this.getPage();
+		// Auto-refresh: deepseek rotates its session token periodically. Before
+		// each request, re-read the CURRENT token + hif-leim + cookies from the
+		// live page (the web app always has the valid session) so we never send
+		// a stale bearer.
+		await this.refreshSessionFromPage(page);
 		if (!this.chatSessionId) {
 			const session = await this.createChatSession();
 			this.chatSessionId = session.chat_session_id || "";
@@ -150,6 +156,95 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 		});
 		if (!body) throw new Error("DeepSeek Web API returned empty response body");
 		return body;
+	}
+
+	/**
+	 * Re-read the current deepseek session (bearer + hif-leim + cookies) from
+	 * the live browser page and update this client's auth in place. The web app
+	 * always holds the valid session; this lets us survive token rotation
+	 * without a manual webauth.
+	 */
+	private async refreshSessionFromPage(page: Page): Promise<void> {
+		try {
+			const creds = this.auth as DeepSeekWebCredentials;
+			// 1. Read the bearer from the page's localStorage. DeepSeek stores it
+			//    in userToken as {"value":"..."}; other token/auth keys are a
+			//    fallback.
+			const tokenResult = await page.evaluate(() => {
+				const store = globalThis.localStorage;
+				let found = "";
+				// Prefer the known deepseek keys.
+				const preferred = ["userToken", "access_token", "token"];
+				for (const key of preferred) {
+					const raw = store.getItem(key) ?? "";
+					if (!raw) continue;
+					try {
+						const parsed = JSON.parse(raw);
+						if (parsed && typeof parsed === "object") {
+							const v = (parsed as { value?: string; token?: string }).value ?? (parsed as { token?: string }).token;
+							if (typeof v === "string" && v.length > 20) { found = v; break; }
+						}
+					} catch {
+						if (raw.length > 40) { found = raw; break; }
+					}
+				}
+				if (!found) {
+					for (let i = 0; i < store.length; i++) {
+						const key = store.key(i);
+						if (!key || !/token|auth/i.test(key)) continue;
+						const value = store.getItem(key) ?? "";
+						try {
+							const parsed = JSON.parse(value);
+							if (parsed && typeof parsed === "object") {
+								const v = (parsed as { value?: string; token?: string }).value ?? (parsed as { token?: string }).token;
+								if (typeof v === "string" && v.length > 20) { found = v; break; }
+							}
+						} catch {
+							if (value.length > 40) { found = value; break; }
+						}
+					}
+				}
+				return found;
+			}).catch(() => "");
+			if (tokenResult && tokenResult.length > 20 && tokenResult !== creds.bearer) {
+				creds.bearer = tokenResult;
+				console.log("[DeepSeekWebClient] bearer refreshed from page");
+			}
+
+			// 2. Read the x-hif-leim from localStorage (hif_leim_cached) — it
+			//    rotates with the session.
+			const leim = await page
+				.evaluate(() => {
+					const raw = localStorage.getItem("hif_leim_cached") ?? "";
+					return raw;
+				})
+				.catch(() => "");
+			if (leim && leim.length > 10 && leim !== creds.hifLeim) {
+				creds.hifLeim = leim;
+				console.log("[DeepSeekWebClient] hif-leim refreshed from page");
+			}
+
+			// 3. Refresh cookies.
+			const ctx = (await this.getContext()) as unknown as {
+				cookies: (o: { urls?: string[] }) => Promise<{ name: string; value: string }[]>;
+			};
+			const cookies = await ctx.cookies([this.baseUrl]).catch(() => []);
+			if (cookies.length > 0) {
+				const cookieStr = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+				if (cookieStr !== creds.cookie) {
+					creds.cookie = cookieStr;
+					console.log("[DeepSeekWebClient] cookies refreshed from page");
+				}
+			}
+		} catch (err) {
+			console.warn(
+				`[DeepSeekWebClient] session refresh skipped: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	}
+
+	private getContext(): Promise<unknown> {
+		return BrowserManager.getInstance().getContext();
 	}
 
 	override async parseStream(
