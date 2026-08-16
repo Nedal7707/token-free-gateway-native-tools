@@ -165,6 +165,49 @@ console.log(
 	`Authorized providers: ${authorized.length > 0 ? authorized.join(", ") : "none — run 'token-free-gateway webauth' to authorize"}`,
 );
 
+// ── Chrome watchdog ───────────────────────────────────────────
+// OpenCode's built-in chrome tools hit 127.0.0.1:9222 DIRECTLY (not through
+// this gateway). If Chrome's CDP drops, those tools fail with "Chrome CDP
+// disconnected" and sessions stall. Keep Chrome alive: every 30s check the
+// CDP endpoint and auto-restart Chrome when it's gone.
+const CDP_HEALTH_URL = `${loadConfig().cdpUrl}/json/version`;
+async function checkChromeHealth(): Promise<boolean> {
+	try {
+		const res = await fetch(CDP_HEALTH_URL, { signal: AbortSignal.timeout(3000) });
+		return res.ok;
+	} catch {
+		return false;
+	}
+}
+
+async function chromeWatchdogLoop(): Promise<void> {
+	for (;;) {
+		await Bun.sleep(30_000);
+		const up = await checkChromeHealth();
+		if (!up) {
+			console.warn("[ChromeWatchdog] Chrome CDP is down — attempting auto-restart...");
+			try {
+				const { startChrome } = await import("./cli/chrome.ts");
+				await startChrome();
+				// Give it a moment, then verify.
+				await Bun.sleep(5000);
+				if (await checkChromeHealth()) {
+					console.log("[ChromeWatchdog] Chrome CDP restored.");
+				} else {
+					console.warn("[ChromeWatchdog] Chrome still not reachable after restart.");
+				}
+			} catch (err) {
+				console.warn(
+					`[ChromeWatchdog] Auto-restart failed: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+		}
+	}
+}
+chromeWatchdogLoop().catch((err) =>
+	console.error(`[ChromeWatchdog] loop error: ${err instanceof Error ? err.message : String(err)}`),
+);
+
 async function gracefulShutdown(signal: string) {
 	console.log(`\nReceived ${signal}, shutting down...`);
 	await BrowserManager.getInstance().shutdown();
