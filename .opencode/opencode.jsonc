@@ -10,56 +10,66 @@
   "provider": {
     "command-code": {
       "api": "http://127.0.0.1:3457/v1",
-      "env": ["COMMAND_CODE_API_KEY"],
+      "env": [
+        "COMMAND_CODE_API_KEY"
+      ],
       "name": "Command Code"
     },
     "opencode-go": {
       "api": "http://127.0.0.1:3460/opencode/v1",
-      "env": ["OPENCODE_API_KEY"],
+      "env": [
+        "OPENCODE_API_KEY"
+      ],
       "name": "OpenCode Go"
     },
     "gateway": {
       "api": "http://127.0.0.1:3461/v1",
-      "env": ["TFG_API_KEY"],
+      "env": [
+        "TFG_API_KEY"
+      ],
       "name": "Token-Free Gateway"
     },
     "nvidia": {
       "api": "http://127.0.0.1:3460/nvidia/v1",
-      "env": ["NVIDIA_API_KEY"],
+      "env": [
+        "NVIDIA_API_KEY"
+      ],
       "name": "Nvidia"
     },
     "aihubmix": {
       "api": "http://127.0.0.1:3460/aihubmix/v1",
-      "env": ["AIHUBMIX_API_KEY"],
+      "env": [
+        "AIHUBMIX_API_KEY"
+      ],
       "name": "AIHubMix"
     },
     "zenmux": {
       "api": "http://127.0.0.1:3460/zenmux/v1",
-      "env": ["ZENMUX_API_KEY"],
+      "env": [
+        "ZENMUX_API_KEY"
+      ],
       "name": "ZenMux"
     },
     "cloudflare": {
       "api": "http://127.0.0.1:3460/cloudflare/v1",
-      "env": ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"],
+      "env": [
+        "CLOUDFLARE_API_TOKEN",
+        "CLOUDFLARE_ACCOUNT_ID"
+      ],
       "name": "Cloudflare"
     }
   },
-  "enabled_providers": [
-    "command-code",
-    "opencode-go",
-    "gateway",
-    "nvidia",
-    "aihubmix",
-    "zenmux",
-    "cloudflare"
-  ],
   "skills": {
-    "paths": ["./skills"]
+    "paths": [
+      "./skills"
+    ]
   },
   "mcp": {
     "worktree-proof": {
       "type": "local",
-      "command": ["C:\\VectorHQ\\worktree-proof-workflow\\bin\\worktree-proof-mcp.js"],
+      "command": [
+        "C:\\VectorHQ\\worktree-proof-workflow\\bin\\worktree-proof-mcp.js"
+      ],
       "enabled": true,
       "timeout": 30000
     }
@@ -72,8 +82,10 @@
   },
   "permission": {
     "edit": "allow",
-    "bash": "ask",
-    "webfetch": "allow"
+    "bash": "allow",
+    "webfetch": "allow",
+    "doom_loop": "allow",
+    "external_directory": "allow"
   },
-  "logLevel": "info"
+  "logLevel": "INFO"
 }

@@ -44,6 +44,47 @@ function extractLastUserMessage(messages: ChatCompletionRequest["messages"]): st
 }
 
 /**
+ * When the thinking button is on (reasoning_effort present), make the model
+ * reason explicitly. Native-reasoning providers get the effort passed through
+ * separately (the client handles it); for web-session/DOM providers we inject a
+ * step-by-step directive into the prompt so the reasoning is produced and can
+ * be surfaced as reasoning_content by the stream parsers.
+ */
+function applyReasoningDirective(
+	prompt: string,
+	reasoningEffort: string | number | boolean | undefined,
+	providerId: string,
+): string {
+	if (reasoningEffort === undefined || reasoningEffort === null || reasoningEffort === false) {
+		return prompt;
+	}
+	// These providers take effort natively (their clients forward it to the
+	// upstream API) — no prompt injection needed.
+	const nativeReasoning = new Set([
+		"deepseek-web",
+		"claude-web",
+		"chatgpt-web",
+	]);
+	if (nativeReasoning.has(providerId)) return prompt;
+
+	const effort = String(reasoningEffort);
+	const effortLine =
+		effort === "max"
+			? "Think as deeply and thoroughly as possible."
+			: effort === "high"
+				? "Think carefully and reason step by step before answering."
+				: effort === "low"
+					? "Think briefly before answering."
+					: "Think step by step before answering.";
+
+	return [
+		prompt,
+		"",
+		`[Reasoning requested: ${effortLine} Show your internal reasoning in <thinking>...</thinking> tags first, then give the final answer.]`,
+	].join("\n");
+}
+
+/**
  * Decide the send strategy for a provider:
  * - NATIVE: provider supports real tool calling through its backend API. Pass
  *   the original messages + tools + tool_choice straight through and parse
@@ -120,9 +161,21 @@ export async function handleChatCompletions(
 		return jsonError("Could not construct prompt from messages", 400);
 	}
 
+	// Reasoning: when the thinking button is on (reasoning_effort set), make the
+	// model actually reason. Providers with native reasoning (opencode-go,
+	// nvidia, aihubmix via rotator; deepseek web) get the effort passed through
+	// to their API. Web-session providers that can't take effort natively get a
+	// prompt-level thinking directive so the reasoning is produced and surfaced.
+	const reasoningEffort = body.reasoning_effort;
+	const effectivePrompt = applyReasoningDirective(
+		isDom ? domPrompt! : prompt,
+		reasoningEffort,
+		client.providerId,
+	);
+
 	const handler = body.stream
-		? handleStreaming(id, model, isDom ? domPrompt! : prompt, hasTools, native, body, client)
-		: handleNonStreaming(id, model, isDom ? domPrompt! : prompt, hasTools, native, body, client);
+		? handleStreaming(id, model, effectivePrompt, hasTools, native, body, client)
+		: handleNonStreaming(id, model, effectivePrompt, hasTools, native, body, client);
 
 	const timeout = new Promise<Response>((resolve) =>
 		setTimeout(() => {
