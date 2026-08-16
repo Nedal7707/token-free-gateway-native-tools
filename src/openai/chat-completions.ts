@@ -188,9 +188,21 @@ export async function handleChatCompletions(
 		client.providerId,
 	);
 
+	// Persistent agentic directive: web-session models (deepseek/kimi/gemini/
+	// claude) tend to answer after ONE tool round and stop. Inject an explicit
+	// "keep working until done" instruction so agents drive multi-step tasks.
+	const agenticPrompt =
+		`${effectivePrompt}\n\n` +
+		`[Agent behavior: You are an autonomous agent working on a multi-step task. ` +
+		`Use the available tools continuously — do NOT stop after a single tool call or a single answer. ` +
+		`After each tool result, evaluate whether the task is fully complete; if not, ` +
+		`immediately make the NEXT tool call (or continue reasoning) toward completion. ` +
+		`Only produce a final answer when every step of the task is genuinely done. ` +
+		`Never ask "should I continue?" — just continue.]`;
+
 	const handler = body.stream
-		? handleStreaming(id, model, effectivePrompt, hasTools, native, body, client)
-		: handleNonStreaming(id, model, effectivePrompt, hasTools, native, body, client);
+		? handleStreaming(id, model, agenticPrompt, hasTools, native, body, client)
+		: handleNonStreaming(id, model, agenticPrompt, hasTools, native, body, client);
 
 	const timeout = new Promise<Response>((resolve) =>
 		setTimeout(() => {
