@@ -3,6 +3,12 @@ import type { WebProviderClient } from "../providers/types.ts";
 import { ProviderApiError, SessionExpiredError } from "../providers/types.ts";
 import { compactMessages, sanitizeMaxTokens } from "../compaction.ts";
 import { buildPromptFromMessages, parseToolResponse } from "../tool-calling/converter.ts";
+import {
+	appendLedgerEntry,
+	conversationKey,
+	readLedgerTail,
+	renderLedgerMemory,
+} from "../memory/memory-ledger.ts";
 import { makeChunk, sseDone, sseEvent, sseHeaders } from "./sse.ts";
 import type {
 	ChatCompletionRequest,
@@ -20,6 +26,76 @@ export function setRouteTimeoutSec(sec: number): void {
 
 function generateId(): string {
 	return `chatcmpl-${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
+}
+
+/**
+ * Rolling memory: summarize the text of dropped turns with a cheap free model
+ * so compaction never truly loses early context. Tries the verified free
+ * routes in order (Cloudflare Workers AI, Command-Code free gateway, AIHubMix,
+ * ZenMux, NVIDIA free tier, OpenCode Zen, then the gateway itself); the first
+ * that answers is cached for the session. Bounded: input capped, short
+ * timeout per route, failure = empty string (caller falls back to the
+ * extractive note already in the prompt).
+ */
+const SUMMARIZER_ROUTES: { base: string; model: string }[] = [
+	{ base: "http://127.0.0.1:10100/v1", model: "cloudflare-workers-ai/@cf/openai/gpt-oss-120b" },
+	{ base: "http://127.0.0.1:3457/v1", model: "deepseek/deepseek-v4-flash" },
+	{ base: "http://127.0.0.1:3460/aihubmix/v1", model: "coding-glm-5.2-free" },
+	{ base: "http://127.0.0.1:3460/zenmux/v1", model: "deepseek/deepseek-v4-flash-free" },
+	{ base: "http://127.0.0.1:3460/nvidia/v1", model: "nvidia/nvidia/nemotron-3-ultra-550b-a55b" },
+	{ base: "http://127.0.0.1:3460/opencode/v1", model: "deepseek-v4-flash" },
+	{ base: "http://127.0.0.1:3461/v1", model: "deepseek-v4-flash" },
+];
+
+let cachedSummarizerRoute: { base: string; model: string } | null = null;
+
+async function summarizeDroppedText(droppedText: string, model: string): Promise<string> {
+	const input = droppedText.slice(0, 24_000);
+	if (input.length < 200) return "";
+	const routes = cachedSummarizerRoute
+		? [cachedSummarizerRoute, ...SUMMARIZER_ROUTES.filter((r) => r !== cachedSummarizerRoute)]
+		: SUMMARIZER_ROUTES;
+	for (const route of routes) {
+		try {
+			const ctrl = new AbortController();
+			const timer = setTimeout(() => ctrl.abort(), 8_000);
+			const res = await fetch(`${route.base}/chat/completions`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					model: route.model,
+					stream: false,
+					max_tokens: 1_500,
+					messages: [
+						{
+							role: "system",
+							content:
+								"You are a conversation memory summarizer. Produce a dense, structured summary of the OLD turns below so the agent can continue without them. Keep: the original task/objective, all concrete facts, decisions, file paths, tool results, and open questions. Use compact bullet points. Do not invent anything.",
+						},
+						{
+							role: "user",
+							content: `Summary source (older turns of model ${model}):\n\n${input}`,
+						},
+					],
+				}),
+				signal: ctrl.signal,
+			});
+			clearTimeout(timer);
+			if (!res.ok) continue;
+			const data = (await res.json()) as {
+				choices?: { message?: { content?: string } }[];
+			};
+			const text = data.choices?.[0]?.message?.content?.trim() ?? "";
+			if (text.length > 50) {
+				cachedSummarizerRoute = route;
+				console.log(`[memory] rolling summary via ${route.model} (${route.base})`);
+				return text;
+			}
+		} catch {
+			// try next free route
+		}
+	}
+	return "";
 }
 
 function estimateTokens(text: string): number {
@@ -141,15 +217,63 @@ export async function handleChatCompletions(
 
 	// Auto-compaction: trim old turns when the request exceeds the model's
 	// context window, so long agent sessions never hard-fail the web provider.
-	const { messages: compactedMessages, compacted, droppedTokens, budget } = compactMessages(
-		model,
-		body.messages,
-	);
+	const { messages: compactedMessages, compacted, droppedTokens, droppedText, budget } =
+		compactMessages(model, body.messages);
 	if (compacted) {
 		console.log(
 			`[chat-completions] auto-compacted: ${droppedTokens} tokens dropped (budget ${budget}) for model ${model}`,
 		);
 		body = { ...body, messages: compactedMessages };
+	}
+
+	// PERFECT MEMORY: persist this turn to the per-conversation ledger
+	// (append-only, never deleted) and, when compaction dropped turns, build
+	// an LLM rolling summary of the dropped text so early context survives as
+	// dense memory instead of vanishing.
+	const isInternalSummary =
+		body.messages.some(
+			(m) =>
+				m?.role === "system" &&
+				typeof m.content === "string" &&
+				m.content.includes("conversation memory summarizer"),
+		);
+	const memoryKey = conversationKey(model, body.messages);
+	if (!isInternalSummary) {
+		const lastUser = [...body.messages].reverse().find((m) => m?.role === "user");
+		if (lastUser) {
+			void appendLedgerEntry(memoryKey, "user", (lastUser as { content?: string }).content ?? "");
+		}
+		const lastAssistant = [...body.messages].reverse().find((m) => m?.role === "assistant");
+		if (lastAssistant) {
+			const content = (lastAssistant as { content?: string | null }).content;
+			if (typeof content === "string" && content.length > 0) {
+				void appendLedgerEntry(memoryKey, "assistant", content);
+			}
+		}
+	}
+	let ledgerMemory = "";
+	if (compacted) {
+		const ledgerTail = await readLedgerTail(memoryKey);
+		ledgerMemory = renderLedgerMemory(ledgerTail);
+		const rollingSummary = droppedText
+			? await summarizeDroppedText(droppedText, model)
+			: "";
+		if (rollingSummary || ledgerMemory) {
+			// Replace the plain extractive note with the richer memory block.
+			const note = body.messages.find(
+				(m) =>
+					m?.role === "system" &&
+					typeof m.content === "string" &&
+					m.content.startsWith("[context trimmed"),
+			);
+			if (note && typeof note.content === "string") {
+				note.content =
+					`[context trimmed: ${Math.round(droppedTokens)} tokens of earlier turns were dropped. ` +
+					`Continue based on the remaining context and the preserved memory below — do not mention this unless relevant.]\n\n` +
+					(rollingSummary ? `[Rolling memory summary of dropped turns:\n${rollingSummary}\n]\n\n` : "") +
+					(ledgerMemory ? `${ledgerMemory}\n` : "");
+			}
+		}
 	}
 	// Raise tiny/missing max_tokens so reasoning models don't burn their whole
 	// output budget on thinking (returns empty content otherwise).

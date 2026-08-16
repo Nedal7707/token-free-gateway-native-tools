@@ -263,6 +263,7 @@ export function compactMessages(model, messages) {
 		messages: result.messages,
 		compacted: result.droppedTokens > 0,
 		droppedTokens: result.droppedTokens,
+		droppedText: result.droppedText ?? "",
 		budget,
 	};
 }
@@ -387,6 +388,13 @@ function compactWithDrop(model, messages, budget) {
 
 	out.push(...kept);
 
+	// Full text of everything dropped (bounded), so callers can build a richer
+	// LLM summary of the trimmed turns (rolling memory).
+	const droppedText = [
+		...droppedMemory.map((t) => `USER: ${t}`),
+		...droppedAssistantTail.map((t) => `ASSISTANT: ${t}`),
+	].join("\n\n").slice(0, 40_000);
+
 	// Last resort: hard truncate to the budget, keeping system + final user.
 	if (out.reduce((s, m) => s + messageTokens(m), 0) > budget) {
 		const sys = out.filter((m) => m?.role === "system" || m?.role === "developer");
@@ -406,10 +414,11 @@ function compactWithDrop(model, messages, budget) {
 		return {
 			messages: final,
 			droppedTokens: droppedTokens + (out.length - final.length) * 100,
+			droppedText,
 		};
 	}
 
-	return { messages: out, droppedTokens };
+	return { messages: out, droppedTokens, droppedText };
 }
 
 /** JSON-safe clone of the request with compacted messages. */
