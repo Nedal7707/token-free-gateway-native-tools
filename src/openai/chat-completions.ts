@@ -215,22 +215,23 @@ export async function handleChatCompletions(
 
 	// EMPTY/FALLBACK RETRY: if the response is a 200 with empty content (web
 	// models sometimes return an empty turn — kimi thinking-only, deepseek
-	// stale session), retry ONCE so autonomous agents never hit an empty turn
-	// that stops their loop. Tool requests that fail also retry as plain chat
-	// (tools stripped) since web-session models can't always tool-call.
+	// stale session), retry ONCE with the SAME request (tools kept — a fresh
+	// upstream session self-heals and the model can still make its tool calls).
+	// Only on a >=400 error with tools do we fall back to plain chat.
 	const firstBody = await first.clone().text();
 	const isEmptyOk = first.status === 200 && (!firstBody || firstBody.length < 60);
 	if (isEmptyOk || (hasTools && first.status >= 400)) {
 		console.log(
 			`[chat-completions] request returned empty/error (${first.status}), retrying once for ${model}`,
 		);
-		const retryBody: ChatCompletionRequest = hasTools
+		const keepTools = isEmptyOk; // empty content: keep tools; error: strip
+		const retryBody: ChatCompletionRequest = hasTools && !keepTools
 			? { ...body, tools: undefined, tool_choice: undefined }
 			: body;
 		const retryPrompt = buildPromptFromMessages(
 			retryBody.messages,
-			hasTools ? undefined : body.tools,
-			hasTools ? undefined : body.tool_choice,
+			hasTools && keepTools ? body.tools : undefined,
+			hasTools && keepTools ? body.tool_choice : undefined,
 		).prompt;
 		const retry = body.stream
 			? handleStreaming(id, model, retryPrompt, hasTools, native, retryBody, client)
