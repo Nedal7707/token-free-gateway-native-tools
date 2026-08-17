@@ -3,6 +3,7 @@ import https from "node:https";
 import type { Page } from "playwright-core";
 import { BaseApiClient } from "../factory/base-api-client.ts";
 import { BrowserManager } from "../../browser/manager.ts";
+import { getChromeWebSocketUrl } from "../../browser/cdp-helpers.ts";
 import type { ApiClientConfig, NormalizedSendParams } from "../factory/types.ts";
 import { parseCookieHeader } from "../shared/cookie-parser.ts";
 import { throwIfSessionExpired } from "../shared/error-guard.ts";
@@ -110,6 +111,38 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 		if (pool.length === 0) throw new Error("DeepSeekWebClient requires at least one credential set");
 		super(pool[0]!);
 		this.accountPool = pool;
+		// Fire-and-forget CDP liveness probe: drop accounts whose dedicated
+		// Chrome is not running so rotation never burns time on dead ports
+		// (observed: only port 9222 up, 9223-9226 down → every request that
+		// started on a dead account failed with a 502 instead of reaching the
+		// live account). Probe failure falls back to the full pool so a
+		// single-Chrome setup (all accounts on 9222) still works.
+		this.probeLiveAccounts().catch(() => {});
+	}
+
+	/**
+	 * Probe each account's CDP port; keep only accounts whose Chrome is
+	 * reachable. On any probe error keep the full pool (safe fallback).
+	 */
+	private async probeLiveAccounts(): Promise<void> {
+		const portSet = new Set(this.accountPool.map((c) => c.cdpPort ?? 9222));
+		if (portSet.size <= 1) return; // single port = single Chrome, nothing to filter
+		const live = new Set<number>();
+		const results = await Promise.allSettled(
+			[...portSet].map(async (port) => {
+				const ws = await getChromeWebSocketUrl(`http://127.0.0.1:${port}`, 2500);
+				if (ws) live.add(port);
+			}),
+		);
+		if (live.size === 0) return; // all probes failed — don't kill the pool
+		const filtered = this.accountPool.filter((c) => live.has(c.cdpPort ?? 9222));
+		if (filtered.length === 0) return;
+		(this as unknown as { accountPool: DeepSeekWebCredentials[] }).accountPool = filtered;
+		if (this.activeIndex >= filtered.length) this.activeIndex = 0;
+		(this as unknown as { auth: DeepSeekWebCredentials }).auth = filtered[this.activeIndex]!;
+		console.log(
+			`[DeepSeekWebClient] CDP probe: ${[...portSet].sort((a, b) => a - b).join(",")} → live ${[...live].sort((a, b) => a - b).join(",")} (pool ${this.accountPool.length} → ${filtered.length})`,
+		);
 	}
 
 	/**
@@ -266,10 +299,16 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 				err instanceof DOMException && err.name === "AbortError";
 			const isCancelled =
 				err instanceof Error && /cancel/i.test(err.message);
+			// CDP/connection failures (Chrome not running on the account's
+			// port) are NOT rate limits: hop through every remaining account
+			// so a request starting on a dead port still reaches a live one.
+			// RateLimitError rotates internally and retries once only.
+			const isCdpFailure = err instanceof Error && /failed to connect to chrome|cdp|websocket|playwright/i.test(err.message);
+			const maxHops = isCdpFailure ? this.accountPool.length : 1;
 			if (
 				!isAbort &&
 				!isCancelled &&
-				attempt < 1 &&
+				attempt < maxHops &&
 				this.accountPool.length > 1 &&
 				this.limitedAccounts.size < this.accountPool.length
 			) {
@@ -608,10 +647,17 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 			model_type: null,
 			prompt: params.message,
 			ref_file_ids: params.fileIds || [],
-			// Real reasoning: thinking enabled when the client asks for effort
-			// (or by default for reasoning-capable models). DeepSeek's web API
-			// returns reasoning_content in the stream when thinking is on.
-			thinking_enabled: params.reasoningEffort !== undefined && params.reasoningEffort !== false,
+			// Thinking mode DISABLED (fix 2026-08-17): the deepseek web API,
+			// when thinking_enabled=true, streams the model's chain-of-thought
+			// as PLAIN text deltas with no reasoning marker (no
+			// reasoning_content, no type=thinking, no THINKING fragment). The
+			// gateway parser therefore surfaces the whole internal monologue
+			// as visible content — "I see his thinking as output" — and the
+			// real answer gets buried at the end. The model still reasons
+			// internally; it just answers directly. Verified live: with
+			// thinking off, v4-pro returns clean answers and multi-step tool
+			// calls (finish_reason=tool_calls).
+			thinking_enabled: false,
 			search_enabled: params.searchEnabled ?? true,
 			action: null,
 			preempt: params.preempt ?? false,

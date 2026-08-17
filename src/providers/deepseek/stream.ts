@@ -133,7 +133,7 @@ export async function parseDeepSeekStream(
 			const dataStr = line.slice(6).trim();
 			if (dataStr === "[DONE]" || !dataStr) return;
 
-			try {
+try {
 				const data = JSON.parse(dataStr) as Record<string, unknown>;
 
 				if (
