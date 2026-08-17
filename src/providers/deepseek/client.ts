@@ -684,7 +684,29 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 					resolve(
 						new ReadableStream<Uint8Array>({
 							start(controller) {
+								// IDLE TIMEOUT: DeepSeek can return HTTP 200 with a
+								// stream that never produces data (silent rate limit /
+								// stale session). The request-level 90s timer above
+								// cannot help because the promise already resolved on
+								// headers — so error the STREAM after 90s of no data.
+								// parseStream then throws, the gateway's retry fires on
+								// the rotated account, and agents never hang 300s.
+								let idleTimer: ReturnType<typeof setTimeout> | null = null;
+								const armIdle = () => {
+									if (idleTimer) clearTimeout(idleTimer);
+									idleTimer = setTimeout(() => {
+										try {
+											controller.error(
+												new Error("DeepSeek stream idle timeout after 90s"),
+											);
+										} catch {
+											// controller already closed
+										}
+									}, 90_000);
+								};
+								armIdle();
 								res.on("data", (chunk: Buffer) => {
+									armIdle(); // reset on any data
 									try {
 										controller.enqueue(new Uint8Array(chunk));
 									} catch {
@@ -692,6 +714,7 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 									}
 								});
 								res.on("end", () => {
+									if (idleTimer) clearTimeout(idleTimer);
 									try {
 										controller.close();
 									} catch {
@@ -699,6 +722,7 @@ export class DeepSeekWebClient extends BaseApiClient<DeepSeekWebCredentials> {
 									}
 								});
 								res.on("error", (e) => {
+									if (idleTimer) clearTimeout(idleTimer);
 									try {
 										controller.error(e);
 									} catch {

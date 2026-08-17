@@ -1,4 +1,6 @@
 {
+  "model": "gateway/deepseek-v4-pro",
+  "default_subagent_model": "gateway/deepseek-v4-pro",
   "$schema": "https://opencode.ai/config.json",
   "instructions": [
     "This is the token-free-gateway development repo (Bun + TypeScript).",
