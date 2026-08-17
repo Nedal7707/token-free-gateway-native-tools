@@ -2,7 +2,12 @@ import { evictProviderClient } from "../providers/registry.ts";
 import type { WebProviderClient } from "../providers/types.ts";
 import { ProviderApiError, RateLimitError, SessionExpiredError } from "../providers/types.ts";
 import { compactMessages, sanitizeMaxTokens } from "../compaction.ts";
-import { buildPromptFromMessages, parseToolResponse } from "../tool-calling/converter.ts";
+import {
+	buildPromptFromMessages,
+	parseToolResponse,
+	resolveNativeToolCalls,
+	resolveRequestTools,
+} from "../tool-calling/converter.ts";
 import {
 	appendLedgerEntry,
 	conversationKey,
@@ -285,8 +290,15 @@ export async function handleChatCompletions(
 
 	// For native providers we still build a text prompt for the sendMessage
 	// message field, but ALSO pass the structured tools + raw messages through.
-	// For DOM providers we keep the full prompt-injection path.
-	const { prompt, hasTools } = buildPromptFromMessages(body.messages, body.tools, body.tool_choice);
+	// For DOM providers we keep the full prompt-injection path. The synthetic
+	// final_answer tool is only injected on the prompt-injection path (web
+	// providers) — native providers do real tool calling and must not see it.
+	const { prompt, hasTools } = buildPromptFromMessages(
+		body.messages,
+		body.tools,
+		body.tool_choice,
+		!native,
+	);
 
 	if (!prompt) {
 		return jsonError("Could not construct prompt from messages", 400);
@@ -377,6 +389,7 @@ export async function handleChatCompletions(
 			retryBody.messages,
 			hasTools && keepTools ? body.tools : undefined,
 			hasTools && keepTools ? body.tool_choice : undefined,
+			!native,
 		).prompt;
 		const retry = body.stream
 			? handleStreaming(id, model, retryPrompt, hasTools, native, retryBody, client)
@@ -417,18 +430,21 @@ async function handleNonStreaming(
 		let toolCalls: ToolCallOutput[] | undefined;
 		let finishReason: "stop" | "tool_calls" | "length";
 
-		if (native && result.toolCalls && result.toolCalls.length > 0) {
-			// NATIVE tool calls from the provider API.
-			toolCalls = result.toolCalls.map((tc) => ({
-				id: tc.id ?? `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
-				type: "function" as const,
-				function: { name: tc.name, arguments: tc.arguments },
-			}));
-			content = null;
-			finishReason = "tool_calls";
-		} else if (hasTools) {
+		const effectiveTools = !native
+			? resolveRequestTools(body.tools, body.messages)
+			: body.tools;
+
+		if (result.toolCalls && result.toolCalls.length > 0) {
+			// Provider-native tool calls (real API tool_calls for native
+			// providers, or <tool_call> XML extracted by web stream parsers).
+			// Filtered to requested tools; final_answer is intercepted here.
+			const resolved = resolveNativeToolCalls(result.toolCalls, effectiveTools);
+			toolCalls = resolved.toolCalls;
+			content = resolved.content;
+			finishReason = resolved.finishReason;
+} else if (hasTools) {
 			// Prompt-injection fallback (DOM providers / no native calls returned).
-			const parsed = parseToolResponse(result.text, body.tools);
+			const parsed = parseToolResponse(result.text, effectiveTools);
 			content = parsed.content;
 			toolCalls = parsed.toolCalls;
 			finishReason = parsed.finishReason;
@@ -664,7 +680,24 @@ async function streamWithTools(
 	promptTokens: number,
 ) {
 	const result = await client.parseStream(providerStream);
-	const { content, toolCalls, finishReason } = parseToolResponse(result.text, body.tools);
+	const effectiveTools = resolveRequestTools(body.tools, body.messages);
+	// Provider-native <tool_call> XML extraction (deepseek stream parser) takes
+	// priority: those calls are NOT in result.text. final_answer is intercepted
+	// here and converted to a plain text stop response.
+	const nativeResolved = resolveNativeToolCalls(result.toolCalls, effectiveTools);
+	let content: string | null;
+	let toolCalls: ToolCallOutput[] | undefined;
+	let finishReason: "stop" | "tool_calls";
+	if (nativeResolved.toolCalls || nativeResolved.content !== null) {
+		content = nativeResolved.content;
+		toolCalls = nativeResolved.toolCalls;
+		finishReason = nativeResolved.finishReason;
+	} else {
+		const parsed = parseToolResponse(result.text, effectiveTools);
+		content = parsed.content;
+		toolCalls = parsed.toolCalls;
+		finishReason = parsed.finishReason;
+	}
 
 	if (finishReason === "tool_calls" && toolCalls) {
 		emitToolCallDeltas(w, id, model, toolCalls);
